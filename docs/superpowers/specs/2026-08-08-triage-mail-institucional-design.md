@@ -109,13 +109,19 @@ Para cada correo, el clasificador responde tres preguntas **en este orden**:
 
 | Categoría | Acción | ¿Interrumpe a JP? |
 |---|---|---|
-| **Ruido** — newsletters, notificaciones automáticas, spam | Mueve a la carpeta `Ruido` | No. Solo un conteo en el briefing |
+| **Ruido** — newsletters, notificaciones automáticas, spam | Mueve a la carpeta `INBOX.Ruido` (ver 6.2) | No. Solo un conteo en el briefing |
 | **Delegado** — tema de Enzo o Natalia, ya están en copia | Ninguna. Abre hilo de seguimiento | No. Solo si vence el plazo sin señal |
 | **A derivar** — tema de Enzo o Natalia, no están en copia | Responde al hilo con copia a todos, agregando al responsable. Abre seguimiento | Aparece en el briefing como hecho consumado |
 | **Tuyo** — escalación, reunión, pedido personal | Ninguna acción automática | Sí: va al briefing como acción de JP |
 | **Duda** — no hay regla que cubra el caso, o la confianza es baja | Ninguna | Sí: pregunta con botones |
 
 Las confirmaciones de pago, pagos rechazados y facturas rechazadas que llegan por ser contacto principal de sistemas de terceros **no son ruido**: son de Natalia, y caen en "A derivar".
+
+### 6.2 Convención de carpetas del servidor
+
+Verificado contra el servidor real (`vps-1862452-x.dattaweb.com`, 2026-08-08): las carpetas usan **prefijo `INBOX.` con punto como separador** — `INBOX.Sent`, `INBOX.Trash`, `INBOX.Drafts`, `INBOX.spam`, `INBOX.Promociones`.
+
+La carpeta de ruido debe crearse por lo tanto como **`INBOX.Ruido`**. Asumir el nombre plano `Ruido` hace que el archivado falle, y en algunos servidores falla en silencio. El nombre va en `.env` (`CARPETA_RUIDO`) en lugar de estar escrito en el código, y el sistema la crea si no existe.
 
 ## 7. Derivación: responder a todos, no reenviar
 
