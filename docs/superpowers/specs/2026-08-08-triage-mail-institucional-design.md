@@ -312,7 +312,31 @@ Precios de referencia si se llega a necesitar API paga: Claude Haiku 4.5 (USD 1 
 
 **Riesgo identificado:** distinguir "consulta de facturación" de "disconformidad grave sobre facturación" es exactamente donde los modelos chicos flojean. Es la razón por la que el umbral separa la categoría "Tuyo" del promedio general en lugar de mirar solo el porcentaje agregado.
 
-### 11.7 La suscripción de Claude Code no sirve como API
+### 11.7 Prueba de humo (2026-08-08)
+
+Se probaron dos proveedores con claves reales (`SecretariaPersonal` en Groq y en NVIDIA) contra tres correos sintéticos difíciles del dominio: uno técnico con el responsable ya en copia (esperado `DELEGADO`), un reclamo furioso sobre facturación (esperado `TUYO` — la escalación pisa al tema), y una notificación automática de comprobante rechazado (esperado `A_DERIVAR` a Natalia, no `RUIDO`).
+
+| Proveedor / modelo | Aciertos | Latencia por correo |
+|---|---|---|
+| groq / `llama-3.3-70b-versatile` | 3/3 | 0,6 s |
+| groq / `openai/gpt-oss-120b` | 3/3 | 1,0 s |
+| nvidia / `nvidia/nemotron-3-super-120b-a12b` | 2/3 | 9,6 s |
+| groq / `llama-3.1-8b-instant` | 1/3 | 0,4 s |
+| nvidia / `meta/llama-3.3-70b-instruct` | 1/3 (timeouts) | 72,7 s |
+
+Todos los modelos serios acertaron el caso de escalación, lo que confirma que el orden de los tres ejes de la sección 6 es aprendible por un modelo.
+
+**Configuración inicial elegida:** Groq para ambas etapas, `llama-3.1-8b-instant` para el filtro de ruido y `llama-3.3-70b-versatile` para el clasificador. NVIDIA queda como respaldo configurado.
+
+Tres hallazgos operativos que condicionan la implementación:
+
+1. **Cloudflare rechaza el User-Agent por defecto de `urllib`** con un `HTTP 403, error code 1010`. No es un error de la API ni de credenciales, pero lo parece. El adaptador `openai_compat` debe enviar un User-Agent propio, y este caso debe estar cubierto por un test.
+2. **NVIDIA en nivel gratuito es lento e inestable** (10 a 70 segundos por correo, con timeouts). Sirve como respaldo, no como motor principal.
+3. **Los resultados de una sola pasada son ruido.** Nemotron dio 3/3 en una corrida y 2/3 en la siguiente, con `temperature: 0`. El banco de comparación de la sección 11.4 debe correr cada caso varias veces y reportar la dispersión, no un número único.
+
+**Alcance de esta prueba:** tres correos sintéticos no son un benchmark. Demuestra que la cadena funciona de punta a punta y da una señal temprana; la decisión definitiva la toma el set real de la sección 12 contra el umbral de la 11.6.
+
+### 11.8 La suscripción de Claude Code no sirve como API
 
 Se evaluó y se descartó. La suscripción de Claude Code paga uso interactivo; la API se factura por token en una cuenta separada. El modo headless (`claude -p`) sí corre contra la suscripción, pero no es base para un sistema desatendido: los límites están pensados para sesiones interactivas, cada llamada arrastra el arranque del CLI, y un ajuste de límites dejaría al sistema sin funcionar sin aviso.
 
