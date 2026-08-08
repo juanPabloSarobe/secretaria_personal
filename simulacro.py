@@ -11,7 +11,7 @@ Lo único que sale hacia afuera son mensajes de Telegram para vos.
 
 Uso:  python3 simulacro.py [cantidad]
 """
-import email, email.policy, html, imaplib, json, os, re, sys, time
+import email, email.policy, email.utils, html, imaplib, json, os, re, sys, time
 import urllib.error, urllib.parse, urllib.request
 from datetime import datetime, timezone
 
@@ -48,11 +48,25 @@ def teclado(idx):
             filas.append(fila); fila = []
     if fila:
         filas.append(fila)
+    filas.append([{"text": "⭐ Cliente importante", "callback_data": f"i|{idx}|0"}])
     return {"inline_keyboard": filas}
 
 
-def esperar_respuesta(idx, offset):
-    """Long-polling hasta que JP toque un botón de este correo."""
+def teclado_direcciones(idx, direcciones):
+    """Lista de direcciones del correo, para marcar cuál es el cliente importante."""
+    filas = [[{"text": f"⭐ {etiqueta}"[:60], "callback_data": f"d|{idx}|{n}"}]
+             for n, (etiqueta, _) in enumerate(direcciones)]
+    filas.append([{"text": "← volver", "callback_data": f"v|{idx}|0"}])
+    return {"inline_keyboard": filas}
+
+
+def esperar_respuesta(idx, offset, msg_id, texto, direcciones):
+    """Long-polling hasta que JP elija una categoría.
+
+    En el medio puede entrar y salir del submenú de clientes importantes
+    tantas veces como quiera; solo un botón de categoría termina el ciclo.
+    """
+    marcados = []
     while True:
         d = tg("getUpdates", offset=offset, timeout=60, allowed_updates=["callback_query"])
         for u in d.get("result", []):
@@ -61,11 +75,78 @@ def esperar_respuesta(idx, offset):
             if not cq:
                 continue
             partes = cq["data"].split("|")
-            if len(partes) == 3 and partes[0] == "c" and partes[1] == str(idx):
+            if len(partes) != 3 or partes[1] != str(idx):
+                tg("answerCallbackQuery", callback_query_id=cq["id"],
+                   text="Ese botón es de otro correo, ya pasó.")
+                continue
+            accion, valor = partes[0], partes[2]
+
+            if accion == "c":                                   # categoría: termina
                 tg("answerCallbackQuery", callback_query_id=cq["id"])
-                return partes[2], offset, cq["message"]["message_id"]
-            tg("answerCallbackQuery", callback_query_id=cq["id"],
-               text="Ese es de otro correo, ya pasó.")
+                return valor, offset, marcados
+
+            if accion == "i":                                   # abrir submenú
+                tg("answerCallbackQuery", callback_query_id=cq["id"])
+                if not direcciones:
+                    tg("answerCallbackQuery", callback_query_id=cq["id"],
+                       text="Este correo no tiene direcciones externas.")
+                    continue
+                tg("editMessageText", chat_id=os.environ["TELEGRAM_CHAT_ID"],
+                   message_id=msg_id, parse_mode="HTML",
+                   text=texto.replace("¿Qué correspondía?",
+                                      "¿Cuál de estos es el cliente importante?"),
+                   reply_markup=teclado_direcciones(idx, direcciones))
+
+            elif accion == "d":                                 # elegir dirección
+                etiqueta, direccion = direcciones[int(valor)]
+                nuevo = marcar_importante(etiqueta, direccion)
+                tg("answerCallbackQuery", callback_query_id=cq["id"],
+                   text=("⭐ Guardado: " + direccion) if nuevo else "Ya estaba en la lista")
+                marcados.append(direccion)
+                tg("editMessageText", chat_id=os.environ["TELEGRAM_CHAT_ID"],
+                   message_id=msg_id, parse_mode="HTML",
+                   text=texto.replace("¿Qué correspondía?",
+                                      f"⭐ {html.escape(direccion)} marcado como importante.\n\n"
+                                      "¿Qué correspondía?"),
+                   reply_markup=teclado(idx))
+
+            elif accion == "v":                                 # volver sin marcar
+                tg("answerCallbackQuery", callback_query_id=cq["id"])
+                tg("editMessageText", chat_id=os.environ["TELEGRAM_CHAT_ID"],
+                   message_id=msg_id, parse_mode="HTML", text=texto,
+                   reply_markup=teclado(idx))
+
+
+# ------------------------------------------------------------------ Roster
+DOMINIO_PROPIO = "fullcontrolgps.com.ar"
+
+
+def direcciones_externas(correo):
+    """Direcciones del correo que no son del propio equipo, sin repetir."""
+    crudas = email.utils.getaddresses(
+        [correo["de"], correo["para"], correo.get("cc", "")])
+    vistas, salida = set(), []
+    for nombre, dire in crudas:
+        dire = dire.strip().lower()
+        if not dire or "@" not in dire or DOMINIO_PROPIO in dire or dire in vistas:
+            continue
+        vistas.add(dire)
+        salida.append(((nombre.strip() or dire), dire))
+    return salida[:8]
+
+
+def marcar_importante(etiqueta, direccion):
+    """Agrega la dirección a roster.md. Devuelve False si ya estaba."""
+    texto = open("roster.md", encoding="utf-8").read()
+    if direccion in texto:
+        return False
+    hoy = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    linea = f"- {direccion}"
+    if etiqueta and etiqueta.lower() != direccion:
+        linea += f"  <!-- {etiqueta} -->"
+    with open("roster.md", "a", encoding="utf-8") as f:
+        f.write(f"{linea}  <!-- marcado {hoy} desde Telegram -->\n")
+    return True
 
 
 # ------------------------------------------------------------------ Correo
@@ -212,8 +293,11 @@ def main():
     tg("sendMessage", chat_id=chat, parse_mode="HTML", text=(
         f"🧪 <b>Simulacro — {len(correos)} correos</b>\n\n"
         "Te voy a mostrar uno por uno. Decime qué correspondía hacer.\n\n"
-        "<i>No veo mi propia respuesta hasta que elegís, así que no te condiciono. "
+        "<i>No te muestro mi respuesta hasta que elegís, así que no te condiciono. "
         "Después te digo si coincidimos.</i>\n\n"
+        "⭐ Si además el remitente es un <b>cliente importante</b>, tocá ese botón "
+        "y elegí cuál de las direcciones es. Queda guardado en el roster y habilita "
+        "que te avise fuera de horario.\n\n"
         "No muevo ni mando nada: esto es solo lectura."))
 
     offset, resultados, t_inicio = 0, [], time.time()
@@ -235,7 +319,8 @@ def main():
         msg_id = m["result"]["message_id"]
 
         t_espera = time.time()
-        eleccion, offset, _ = esperar_respuesta(idx, offset)
+        eleccion, offset, marcados = esperar_respuesta(
+            idx, offset, msg_id, texto, direcciones_externas(c))
         t_espera = time.time() - t_espera
 
         coincide = eleccion == pred["categoria"]
@@ -252,6 +337,7 @@ def main():
                            "cuerpo": c["cuerpo"][:1500],
                            "prediccion": pred, "correcto": eleccion,
                            "coincide": coincide,
+                           "marcados_importantes": marcados,
                            "seg_clasificacion": round(t_clas, 2),
                            "seg_decision_jp": round(t_espera, 1)})
         print(f"  {idx}/{len(correos)}  pred={pred['categoria']:<9} jp={eleccion:<9} "

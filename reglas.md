@@ -48,7 +48,8 @@ demás se aprende.
   **cliente** de Full Control GPS, no cuando un proveedor nos numera un ticket.
   (aprendida 2026-08-08 — consultas@sipago.coop, "sipago Reclamo 42467")
 
-- **Generalización a confirmar con JP:** la correspondencia de proveedores de
-  servicios financieros, de cobro y de facturación se trata como Natalia por
-  defecto, aunque tenga forma de notificación automática. Solo es RUIDO si es
-  publicidad pura, sin relación con una cuenta o una operación en curso.
+- **NO generalizar a otros proveedores.** JP descartó extender esta regla a
+  "proveedores financieros y de cobro" en general: SiPago es un caso concreto,
+  no la instancia de una categoría. Cada proveedor nuevo se aprende por
+  separado, preguntando.
+  (decidido 2026-08-08 por JP, al revisar la generalización propuesta)

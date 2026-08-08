@@ -44,7 +44,8 @@ sobre esa misma factura es de JP. La escalación pisa al tema.
 Correos de estos remitentes habilitan alerta fuera de horario, aunque el tema
 sea rutinario.
 
-<!-- PENDIENTE: completar. Un dominio o nombre por línea. Ejemplos de formato:
-- transportexyz.com
-- Nueva Cerámica SA
--->
+JP los marca desde Telegram con el botón ⭐ mientras revisa correo; también se
+pueden agregar o borrar a mano editando la lista de abajo. La sección termina
+al final del archivo, así que las altas nuevas se agregan acá abajo.
+
+## Lista

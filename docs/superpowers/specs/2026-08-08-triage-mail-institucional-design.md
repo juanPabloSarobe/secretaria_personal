@@ -44,7 +44,7 @@ Que JP deje de revisar la casilla institucional. El sistema lee, clasifica, deri
 1. **Capa 2 — Captura de recordatorios.** Mandarle un audio o texto al bot desde cualquier lado y que lo devuelva en el momento correcto. Se apoya sobre la misma infraestructura (bot de Telegram + base de pendientes).
 2. **Capa 3 — WhatsApp de la oficina.** Leer y avisar de lo que llega al número de la oficina, sin usar la API oficial. Es donde está el riesgo técnico del proyecto completo.
 
-**Explícitamente fuera de este diseño:** el sistema nunca redacta contenido nuevo hacia afuera. Usa plantillas fijas y editables. No responde consultas de clientes en nombre de JP.
+**Explícitamente fuera de este diseño:** el sistema **no responde consultas de clientes en nombre de JP**. Lo único que redacta hacia afuera es el aviso de que la consulta fue derivada, y lo hace bajo las restricciones de la sección 7.1: generación acotada, validación mecánica antes de enviar, y plantilla fija de reserva si la validación falla. Contestar la consulta en sí es siempre trabajo de la persona responsable.
 
 ## 4. Actores
 
@@ -59,6 +59,10 @@ Definidos en `roster.md`, editable a mano.
 **Observación estructural:** Enzo y Natalia se definen por *tema*. JP se define por *severidad*. Una consulta de facturación es de Natalia; una disconformidad grave sobre esa misma factura es de JP. Por eso la regla de escalación **pisa** a la regla de tema.
 
 `roster.md` también contiene la **lista de clientes importantes**, cuyos correos habilitan alerta fuera de horario.
+
+**Esa lista se construye desde Telegram, no editando archivos.** Cuando JP está revisando correo y reconoce a un cliente importante, toca el botón ⭐ y el bot le ofrece las direcciones que aparecen en ese correo para que elija cuál. La dirección queda escrita en `roster.md` con la fecha. Las direcciones del propio dominio se excluyen de la oferta: son el equipo, no clientes.
+
+El motivo es práctico: JP suele reconocer al cliente importante en el momento en que ve su correo, y con frecuencia sin tener acceso a la computadora. Pedirle que después edite un archivo garantiza que la lista quede vacía. La lista sigue siendo editable a mano para altas y bajas en bloque.
 
 ## 5. Arquitectura
 
@@ -135,11 +139,28 @@ Esto tiene tres efectos:
 
 **Regla global:** toda salida del sistema es respuesta a todos. Nunca responde solo al remitente.
 
-### 7.1 Plantillas
+### 7.1 Redacción: generación acotada con validación
 
-Fijas y editables en `plantillas.md`. El modelo elige qué plantilla usar y a quién copiar; **no redacta texto libre**.
+Una plantilla idéntica en cada derivación se nota y suena mecánica. Pero el texto fijo era una propiedad de seguridad, no una comodidad: lo que no varía no puede decir algo indebido.
 
-Derivación:
+La solución es **generar dentro de una jaula**: el modelo redacta el mensaje, un validador mecánico lo revisa antes de que salga, y si no pasa alguna comprobación se envía la plantilla fija de reserva. La caída es silenciosa y no interrumpe la operación.
+
+**El modelo recibe** el correo original, el nombre y la casilla del responsable, y esta instrucción: informá que se deriva la consulta, no la respondas, no prometas plazos, no inventes datos.
+
+**El validador exige** —todas comprobaciones de código, ninguna de criterio:
+
+| Comprobación | Motivo |
+|---|---|
+| Menciona al responsable por nombre y por dirección | Es la información que el mensaje existe para transmitir |
+| Largo entre 150 y 500 caracteres | Fuera de ese rango el modelo se desvió del encargo |
+| Termina con la firma exacta, carácter por carácter | La firma es identidad de JP y no se improvisa |
+| No contiene fechas, montos, plazos ni números de comprobante | Son los datos con los que se compromete a la empresa |
+| No contiene signos de pregunta dirigidos al cliente | Preguntar abre una conversación que JP no va a seguir |
+| No introduce entidades ausentes del correo original | Detecta invención de datos |
+
+**Variación permitida:** mencionar el tema al pasar ("su consulta sobre la unidad 47"), ajustar la formalidad al tono del remitente, y reconocer si es un primer contacto o una insistencia. Eso es lo que evita el efecto robot sin comprometer nada.
+
+**Plantilla de reserva**, en `plantillas.md`, usada cuando la validación falla:
 
 ```
 Estimado/a:
@@ -151,11 +172,13 @@ Juan Pablo Sarobe
 Full Control GPS
 ```
 
-Repregunta por silencio:
+Repregunta por silencio (esta **no** se genera: es interna, va al equipo, y la variación no aporta nada):
 
 ```
 {Nombre}, ¿hay novedades sobre este tema?
 ```
+
+**Métrica a vigilar:** la proporción de mensajes que caen a la plantilla de reserva. Si es alta, el prompt está mal calibrado o el modelo no alcanza para esta tarea, y conviene saberlo por un número y no por una queja de un cliente.
 
 ## 8. Aprendizaje
 
