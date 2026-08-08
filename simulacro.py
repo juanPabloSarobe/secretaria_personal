@@ -11,7 +11,8 @@ Lo único que sale hacia afuera son mensajes de Telegram para vos.
 
 Uso:  python3 simulacro.py [cantidad]
 """
-import email, email.policy, html, imaplib, json, os, re, sys, time, urllib.parse, urllib.request
+import email, email.policy, html, imaplib, json, os, re, sys, time
+import urllib.error, urllib.parse, urllib.request
 from datetime import datetime, timezone
 
 CANTIDAD = int(sys.argv[1]) if len(sys.argv) > 1 else 10
@@ -147,6 +148,28 @@ Respondé SOLO un objeto JSON, sin texto alrededor:
 {{"categoria":"<una de las seis>","motivo":"<máximo 12 palabras>","confianza":"alta|media|baja"}}"""
 
 
+def _pedir(req, intentos=6):
+    """Llama al proveedor tolerando límites de tasa.
+
+    El nivel gratuito devuelve 429 si se lo satura. Respetamos la cabecera
+    Retry-After cuando viene, y si no, esperamos cada vez más. Los 5xx son
+    transitorios y se reintentan igual; los demás errores se propagan porque
+    reintentarlos no arregla nada.
+    """
+    for intento in range(intentos):
+        try:
+            with urllib.request.urlopen(req, timeout=60) as r:
+                return json.load(r)
+        except urllib.error.HTTPError as e:
+            if e.code != 429 and e.code < 500:
+                raise
+            if intento == intentos - 1:
+                raise
+            espera = float(e.headers.get("Retry-After") or 0) or min(2 ** intento, 30)
+            print(f"      (HTTP {e.code} — esperando {espera:.0f}s)", flush=True)
+            time.sleep(espera + 0.5)
+
+
 def clasificar(sistema, correo):
     payload = json.dumps({
         "model": os.environ["LLM_CLASIFICADOR_MODEL"],
@@ -162,8 +185,7 @@ def clasificar(sistema, correo):
         os.environ["LLM_CLASIFICADOR_BASE_URL"] + "/chat/completions", data=payload,
         headers={**UA, "Authorization": "Bearer " + os.environ["LLM_CLASIFICADOR_API_KEY"],
                  "Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=60) as r:
-        txt = json.load(r)["choices"][0]["message"]["content"]
+    txt = _pedir(req)["choices"][0]["message"]["content"]
     i, j = txt.find("{"), txt.rfind("}")
     try:
         return json.loads(txt[i:j + 1])

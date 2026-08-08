@@ -35,7 +35,15 @@ arreglados, rotos, inestables = [], [], []
 
 for i, c in enumerate(d["casos"], 1):
     correo = {k: c[k] for k in ("de", "para", "cc", "asunto", "cuerpo")}
-    votos = Counter(clasificar(sistema, correo)["categoria"] for _ in range(PASADAS))
+    votos = Counter()
+    for _ in range(PASADAS):
+        try:
+            votos[clasificar(sistema, correo)["categoria"]] += 1
+        except Exception as e:                  # un fallo aislado no tira la corrida
+            print(f"{i:<3} error en una pasada: {type(e).__name__}")
+    if not votos:
+        print(f"{i:<3} {c['correcto']:<9} {'—':<9} {'SIN DATO':<9} {'0/' + str(PASADAS):<8} ⚠️  todas las pasadas fallaron")
+        continue
     ahora, n_ahora = votos.most_common(1)[0]
     estable = n_ahora == PASADAS
 

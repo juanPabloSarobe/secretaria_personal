@@ -339,6 +339,7 @@ Tres hallazgos operativos que condicionan la implementación:
 1. **Cloudflare rechaza el User-Agent por defecto de `urllib`** con un `HTTP 403, error code 1010`. No es un error de la API ni de credenciales, pero lo parece. El adaptador `openai_compat` debe enviar un User-Agent propio, y este caso debe estar cubierto por un test.
 2. **NVIDIA en nivel gratuito es lento e inestable** (10 a 70 segundos por correo, con timeouts). Sirve como respaldo, no como motor principal.
 3. **Los resultados de una sola pasada son ruido.** Nemotron dio 3/3 en una corrida y 2/3 en la siguiente, con `temperature: 0`. El banco de comparación de la sección 11.4 debe correr cada caso varias veces y reportar la dispersión, no un número único.
+4. **El nivel gratuito de Groq corta con `HTTP 429` ante llamadas seguidas.** Apareció al reclasificar 10 casos × 3 pasadas sin pausa. El adaptador debe reintentar respetando la cabecera `Retry-After` cuando viene, y con espera creciente cuando no; los `5xx` se tratan igual, y el resto de los errores se propagan porque reintentarlos no arregla nada. Esto no es exclusivo del simulacro: el polleo cada 5 minutos con varios correos por tanda puede alcanzar el mismo límite.
 
 **Alcance de esta prueba:** tres correos sintéticos no son un benchmark. Demuestra que la cadena funciona de punta a punta y da una señal temprana; la decisión definitiva la toma el set real de la sección 12 contra el umbral de la 11.6.
 
