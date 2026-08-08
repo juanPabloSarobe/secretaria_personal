@@ -53,3 +53,27 @@ demás se aprende.
   no la instancia de una categoría. Cada proveedor nuevo se aprende por
   separado, preguntando.
   (decidido 2026-08-08 por JP, al revisar la generalización propuesta)
+
+### Mensajes de cortesía y de vínculo personal
+
+- Si el correo es una **despedida, un agradecimiento, una felicitación, un
+  pésame o el aviso de un cambio personal** de alguien que trabaja en un
+  cliente —típicamente un operador de la plataforma—, entonces **corresponde
+  también una respuesta personal de JP**, aunque el tema esté delegado y aunque
+  un integrante del equipo ya haya respondido.
+
+  *Por qué:* estos mensajes no se "resuelven", se corresponden. El valor está
+  justamente en que la respuesta sea personal, así que el hecho de que Natalia
+  o Enzo ya hayan contestado **no lo da por cerrado**. Son personas con las que
+  Full Control GPS construye relación a lo largo de los años, y esa relación es
+  parte del negocio.
+
+  *Cómo se distingue de una escalación:* no hay conflicto ni problema. La regla
+  de escalación se dispara por severidad; esta se dispara por vínculo.
+
+  *Consecuencia estructural:* este es el primer caso donde **dos categorías son
+  verdaderas a la vez** (DELEGADO y TUYO). Ver la sección 6.2 del diseño.
+
+  (aprendida 2026-08-08 — explicada por JP: un operador de un cliente se
+  despedía porque lo pasaban a otro sector, mandaba saludos y buenos augurios;
+  Natalia y Enzo estaban en copia y Natalia ya había respondido)

@@ -113,7 +113,7 @@ Para cada correo, el clasificador responde tres preguntas **en este orden**:
 
 | Categoría | Acción | ¿Interrumpe a JP? |
 |---|---|---|
-| **Ruido** — newsletters, notificaciones automáticas, spam | Mueve a la carpeta `INBOX.Ruido` (ver 6.2) | No. Solo un conteo en el briefing |
+| **Ruido** — newsletters, notificaciones automáticas, spam | Mueve a la carpeta `INBOX.Ruido` (ver 6.3) | No. Solo un conteo en el briefing |
 | **Delegado** — tema de Enzo o Natalia, ya están en copia | Ninguna. Abre hilo de seguimiento | No. Solo si vence el plazo sin señal |
 | **A derivar** — tema de Enzo o Natalia, no están en copia | Responde al hilo con copia a todos, agregando al responsable. Abre seguimiento | Aparece en el briefing como hecho consumado |
 | **Tuyo** — escalación, reunión, pedido personal | Ninguna acción automática | Sí: va al briefing como acción de JP |
@@ -121,7 +121,19 @@ Para cada correo, el clasificador responde tres preguntas **en este orden**:
 
 Las confirmaciones de pago, pagos rechazados y facturas rechazadas que llegan por ser contacto principal de sistemas de terceros **no son ruido**: son de Natalia, y caen en "A derivar".
 
-### 6.2 Convención de carpetas del servidor
+### 6.2 Las categorías no siempre son excluyentes
+
+Los tres ejes de la sección 6 asumen que cada correo tiene **un** responsable, y por eso la matriz de acción tiene categorías mutuamente excluyentes. Un caso real mostró que eso es falso.
+
+Un operador de la plataforma que trabaja en un cliente escribió despidiéndose porque lo pasaban a otro sector, con saludos y agradecimientos. Enzo y Natalia estaban en copia, y Natalia ya había respondido. Mecánicamente es `DELEGADO`: el responsable está en copia y el asunto está atendido. Pero JP también debía responder, personalmente, porque el vínculo con esa persona es parte del negocio y el valor de la respuesta está en que sea suya.
+
+O sea: `DELEGADO` y `TUYO` eran **ambas verdaderas**. No es que el clasificador eligiera mal entre dos opciones; es que el modelo de datos no admitía la respuesta correcta.
+
+**Consecuencia para la implementación:** la decisión del clasificador debe permitir una **acción del equipo y una acción de JP simultáneas**, no una sola categoría. En la práctica: un correo puede quedar delegado *y* aparecer en el briefing como acción personal. La matriz de la sección 6.1 se lee entonces como "qué hace el sistema" y "si además va al briefing", que son dos preguntas y no una.
+
+Los botones del simulacro siguen siendo excluyentes por ahora, lo que subestima estos casos. Corregirlo es trabajo pendiente para la primera versión del sistema real.
+
+### 6.3 Convención de carpetas del servidor
 
 Verificado contra el servidor real (`vps-1862452-x.dattaweb.com`, 2026-08-08): las carpetas usan **prefijo `INBOX.` con punto como separador** — `INBOX.Sent`, `INBOX.Trash`, `INBOX.Drafts`, `INBOX.spam`, `INBOX.Promociones`.
 

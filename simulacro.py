@@ -117,6 +117,77 @@ def esperar_respuesta(idx, offset, msg_id, texto, direcciones):
                    reply_markup=teclado(idx))
 
 
+# ------------------------------------------------------------------ Explicaciones
+def transcribir(file_id):
+    """Baja un audio de Telegram y lo transcribe con Whisper en Groq."""
+    d = tg("getFile", file_id=file_id)
+    ruta = d["result"]["file_path"]
+    url = f"https://api.telegram.org/file/bot{os.environ['TELEGRAM_BOT_TOKEN']}/{ruta}"
+    with urllib.request.urlopen(urllib.request.Request(url, headers=UA), timeout=60) as r:
+        audio = r.read()
+
+    # multipart armado a mano: urllib no trae ayuda para esto
+    borde = "----secretaria" + str(len(audio))
+    partes = []
+    for campo, valor in (("model", "whisper-large-v3-turbo"),
+                         ("response_format", "json"), ("language", "es")):
+        partes.append(f"--{borde}\r\nContent-Disposition: form-data; name=\"{campo}\"\r\n"
+                      f"\r\n{valor}\r\n".encode())
+    partes.append(f"--{borde}\r\nContent-Disposition: form-data; name=\"file\"; "
+                  f"filename=\"nota.ogg\"\r\nContent-Type: audio/ogg\r\n\r\n".encode())
+    partes.append(audio)
+    partes.append(f"\r\n--{borde}--\r\n".encode())
+
+    req = urllib.request.Request(
+        os.environ["GROQ_BASE_URL"] + "/audio/transcriptions", data=b"".join(partes),
+        headers={**UA, "Authorization": "Bearer " + os.environ["GROQ_API_KEY"],
+                 "Content-Type": f"multipart/form-data; boundary={borde}"})
+    with urllib.request.urlopen(req, timeout=90) as r:
+        return json.load(r).get("text", "").strip()
+
+
+def pedir_explicacion(idx, offset, esperado, dicho):
+    """Cuando diferimos, pregunta el porqué. Acepta texto o audio.
+
+    El botón dice QUÉ correspondía; solo el porqué permite escribir una regla
+    que generalice a los casos que todavía no aparecieron.
+    """
+    tg("sendMessage", chat_id=os.environ["TELEGRAM_CHAT_ID"], parse_mode="HTML", text=(
+        f"🤔 Acá diferimos: yo dije <b>{dicho}</b> y vos <b>{esperado}</b>.\n\n"
+        "¿Por qué? Contame con tus palabras — <b>texto o audio</b>, lo que te quede cómodo.\n\n"
+        "<i>Con esto escribo la regla. Sin esto solo sé que me equivoqué, "
+        "no cómo no volver a equivocarme.</i>"),
+        reply_markup={"inline_keyboard": [[
+            {"text": "⏭ Saltear", "callback_data": f"x|{idx}|0"}]]})
+
+    while True:
+        d = tg("getUpdates", offset=offset, timeout=60,
+               allowed_updates=["message", "callback_query"])
+        for u in d.get("result", []):
+            offset = u["update_id"] + 1
+            cq = u.get("callback_query")
+            if cq:
+                tg("answerCallbackQuery", callback_query_id=cq["id"])
+                if cq["data"].startswith(f"x|{idx}|"):
+                    return None, offset
+                continue
+            m = u.get("message") or u.get("edited_message") or {}
+            if m.get("text"):
+                return m["text"].strip(), offset
+            if m.get("voice") or m.get("audio"):
+                nota = m.get("voice") or m.get("audio")
+                try:
+                    texto = transcribir(nota["file_id"])
+                except Exception as e:
+                    tg("sendMessage", chat_id=os.environ["TELEGRAM_CHAT_ID"],
+                       text=f"No pude transcribir el audio ({type(e).__name__}). "
+                            "¿Me lo escribís?")
+                    continue
+                tg("sendMessage", chat_id=os.environ["TELEGRAM_CHAT_ID"],
+                   parse_mode="HTML", text=f"🎙 Te entendí: <i>{html.escape(texto)}</i>")
+                return texto, offset
+
+
 # ------------------------------------------------------------------ Roster
 DOMINIO_PROPIO = "fullcontrolgps.com.ar"
 
@@ -330,6 +401,8 @@ def main():
         "⭐ Si además el remitente es un <b>cliente importante</b>, tocá ese botón "
         "y elegí cuál de las direcciones es. Queda guardado en el roster y habilita "
         "que te avise fuera de horario.\n\n"
+        "🤔 Cuando diferimos te voy a preguntar <b>por qué</b>. Podés contestar "
+        "escribiendo o mandando un audio.\n\n"
         "No muevo ni mando nada: esto es solo lectura."))
 
     offset, resultados, t_inicio = 0, [], time.time()
@@ -378,11 +451,17 @@ def main():
                               f"<i>Mi motivo: {html.escape(pred.get('motivo',''))} "
                               f"(confianza {pred.get('confianza','?')})</i>"))
 
+        explicacion = None
+        if not coincide:
+            explicacion, offset = pedir_explicacion(
+                idx, offset, eleccion, pred["categoria"])
+
         resultados.append({**{k: c[k] for k in
                               ("uid", "de", "para", "cc", "asunto", "fecha", "message_id")},
                            "cuerpo": c["cuerpo"][:1500],
                            "prediccion": pred, "correcto": eleccion,
                            "coincide": coincide,
+                           "explicacion_jp": explicacion,
                            "marcados_importantes": marcados,
                            "seg_clasificacion": round(t_clas, 2),
                            "seg_decision_jp": round(t_espera, 1)})
@@ -397,9 +476,12 @@ def main():
     t_jp_prom = sum(r["seg_decision_jp"] for r in resultados) / n
     fallos = [r for r in resultados if not r["coincide"]]
 
-    detalle = "\n".join(
+    detalle = "\n\n".join(
         f"• <b>{r['correcto']}</b> (yo dije {r['prediccion']['categoria']}) — "
-        f"{html.escape(recortar(r['asunto'], 45))}" for r in fallos) or "—"
+        f"{html.escape(recortar(r['asunto'], 45))}"
+        + (f"\n  <i>{html.escape(recortar(r['explicacion_jp'], 160))}</i>"
+           if r.get("explicacion_jp") else "")
+        for r in fallos) or "—"
 
     tg("sendMessage", chat_id=chat, parse_mode="HTML", text=(
         f"🧪 <b>Simulacro terminado</b>\n\n"
