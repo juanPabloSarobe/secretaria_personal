@@ -88,7 +88,8 @@ Siete piezas, cada una con una responsabilidad y testeable por separado.
 |---|---|---|
 | `imap` | Traer correos nuevos, mover a carpetas, enviar por SMTP | Reglas, LLM, Telegram |
 | `store` | Persistencia en SQLite | LLM, red |
-| `classifier` | (correo, roster, reglas) → decisión. **Función pura.** | Cómo se ejecuta la decisión |
+| `classifier` | (correo, roster, reglas) → decisión. Arma el prompt, parsea y valida. **Función pura.** | Qué proveedor de LLM hay abajo; cómo se ejecuta la decisión |
+| `llm` | Adaptadores de proveedor: `completar(sistema, usuario, esquema) → texto`. Ver sección 11 | Correos, reglas, roster, el dominio entero |
 | `rules` | Leer y escribir `roster.md` y `reglas.md`; generar reglas nuevas | Correos |
 | `actions` | Responder, archivar, abrir seguimiento. **Único módulo con permiso de escritura hacia afuera.** | Reglas, LLM |
 | `bot` | Telegram: briefings, botones, recepción de respuestas | Correos, IMAP |
@@ -235,40 +236,83 @@ JP escribe `¿qué hay?` y recibe el estado actual al instante, sin esperar al b
 
 ## 11. Motor de clasificación
 
-El clasificador tiene **backend intercambiable**, configurado por variable de entorno:
+El sistema es **agnóstico del proveedor de LLM**. Elegir qué modelo le da vida es una decisión de configuración, no de código, y puede tomarse después de que el sistema esté construido.
+
+### 11.1 Dónde va la frontera
+
+El punto crítico del diseño es la altura de la abstracción. El adaptador de proveedor es **deliberadamente tonto** y expone una sola operación:
 
 ```
-LLM_BACKEND=ollama          # ollama | anthropic
-OLLAMA_MODEL=qwen3:30b-a3b
+completar(sistema, usuario, esquema) → texto
 ```
 
-Misma interfaz, misma función pura, mismos tests.
+Todo lo demás —construir el prompt, inyectar `roster.md` y `reglas.md`, parsear la respuesta, validarla contra el esquema, decidir la acción— vive **por encima** de esa línea y es idéntico para todos los proveedores.
 
-### 11.1 Arranque: local
+La alternativa descartada era que cada proveedor implementara `clasificar(correo)`. Eso duplicaría la lógica de prompt y parseo en cada adaptador, y cambiar de proveedor obligaría a tocar lógica de negocio. Con la frontera donde está, cambiar de proveedor cambia el `.env` y nada más.
 
-Se arranca con **Ollama corriendo en la misma Mac Mini** (M4 Pro, 24 GB), reutilizando la instalación de otro proyecto. Costo de operación: cero.
+### 11.2 Dos adaptadores cubren todo el mercado
 
-Candidatos a evaluar, en orden: **Qwen 3 30B-A3B** (mixture-of-experts, entra cómodo en 24 GB y anda bien en español), **Gemma 3 27B**, **Mistral Small 24B**. Para el filtro de ruido alcanza un modelo de ~4B, que lo hace instantáneo.
+Ollama, Groq, NVIDIA NIM, Together, OpenRouter, vLLM y LM Studio hablan todos el mismo protocolo (`/v1/chat/completions`, el de OpenAI). No hacen falta siete adaptadores:
 
-### 11.2 El set de pruebas decide
+| Adaptador | Cubre | Configuración |
+|---|---|---|
+| `openai_compat` | Ollama, Groq, NVIDIA NIM, Together, OpenRouter, vLLM, LM Studio, y cualquier otro compatible | `base_url` + `api_key` + `model` |
+| `anthropic` | Claude, que usa su propia API | `api_key` + `model` |
 
-No se asume que el modelo local alcanza. Se corre el set de pruebas de la sección 12 contra él y se mide contra un umbral definido de antemano:
+```bash
+# Local, costo cero
+LLM_PROVIDER=openai_compat
+LLM_BASE_URL=http://localhost:11434/v1
+LLM_MODEL=qwen3:30b-a3b
+LLM_API_KEY=ollama
+
+# Groq — mismo adaptador, cambian tres valores
+LLM_BASE_URL=https://api.groq.com/openai/v1
+LLM_MODEL=llama-3.3-70b-versatile
+LLM_API_KEY=gsk_...
+```
+
+Se configuran **dos motores por separado**, porque las dos etapas tienen exigencias distintas: `LLM_RUIDO_*` para el filtro de ruido (tarea fácil, alto volumen, conviene lo más barato y rápido) y `LLM_CLASIFICADOR_*` para la clasificación real. Pueden apuntar al mismo proveedor o a proveedores distintos.
+
+### 11.3 Salida estructurada: lo único que no es uniforme
+
+Cada proveedor pide JSON estructurado de forma distinta —Anthropic con un parámetro, los compatibles con OpenAI con otro, Ollama con un tercero— y algunos modelos chicos no lo soportan de forma confiable. Es donde este tipo de abstracción se suele romper.
+
+Cada adaptador declara qué modos soporta, y existe una **estrategia de reserva universal**: pedir el JSON en el prompt, parsear la respuesta, y ante un fallo reintentar una vez incluyendo el error de parseo. Más lento y menos elegante, pero funciona con cualquier modelo. Ningún proveedor queda excluido por una limitación de formato.
+
+### 11.4 El banco de comparación
+
+Como la interfaz es única, el set de pruebas de la sección 12 deja de ser solo una red de seguridad y pasa a ser un **banco de comparación entre proveedores**. Un comando corre el mismo set contra cada proveedor configurado y devuelve una tabla con aciertos, errores en la categoría crítica, latencia por correo y costo estimado por mes.
+
+La decisión de qué LLM usar se toma leyendo esa tabla.
+
+### 11.5 Candidatos a evaluar
+
+**Local (Ollama en la Mac Mini, M4 Pro 24 GB, reutilizando la instalación de otro proyecto).** Costo de operación cero. Candidatos: **Qwen 3 30B-A3B** (mixture-of-experts, entra cómodo en 24 GB y anda bien en español), **Gemma 3 27B**, **Mistral Small 24B**. Para el filtro de ruido alcanza un modelo de ~4B.
+
+**Remoto.** Groq (muy rápido, tiene nivel gratuito con límites de uso — verificar los vigentes al momento de decidir), NVIDIA NIM, y Claude vía API como referencia de calidad máxima.
+
+**Nota operativa sobre el modo local:** la RAM se comparte con el otro proyecto que usa Ollama en la misma máquina. Si ambos usan modelos distintos, Ollama los descarga y recarga alternadamente, con la demora consiguiente. Conviene que ambos proyectos compartan modelo si es posible.
+
+### 11.6 El set de pruebas decide
+
+Ningún proveedor se adopta por suposición. Se corre el set de pruebas de la sección 12 contra cada candidato y se mide contra un umbral definido de antemano:
 
 **Umbral de aprobación:** ≥ 90 % de aciertos sobre el set completo, **y cero falsos negativos en la categoría "Tuyo"**. Un correo de JP clasificado como ruido o derivado sin avisarle es el único error que el sistema no puede permitirse: los demás se corrigen en el briefing siguiente, ese no se entera nunca. Un error en sentido contrario (mandarle al briefing algo que no era suyo) es tolerable — solo cuesta atención.
 
-| Resultado contra el umbral | Decisión |
+Se prefiere, entre los que cumplen el umbral, el de menor costo de operación. El orden esperado de preferencia es local → remoto gratuito → remoto pago, pero lo decide la tabla, no esta lista.
+
+| Resultado contra el umbral | Configuración resultante |
 |---|---|
-| Lo cumple | Se queda en local. USD 0/mes |
-| Falla solo en el eje de escalación | Híbrido: local filtra y clasifica, API decide los casos que el local marca como dudosos. ~USD 5/mes |
-| Falla de forma generalizada | Backend `anthropic` completo. ~USD 20/mes |
+| Un proveedor gratuito lo cumple en las dos etapas | Ese proveedor para todo. USD 0/mes |
+| Lo cumple en ruido pero falla en el eje de escalación | Dos motores: el gratuito para ruido, uno pago para clasificación. ~USD 5/mes |
+| Ningún gratuito lo cumple | Proveedor pago en ambas etapas. ~USD 20/mes |
 
-Precios de referencia si se llega a necesitar la API paga: Claude Haiku 4.5 (USD 1 / 5 por millón de tokens de entrada/salida) para el filtro de ruido, Claude Sonnet 5 (USD 3 / 15) para el clasificador.
+Precios de referencia si se llega a necesitar API paga: Claude Haiku 4.5 (USD 1 / 5 por millón de tokens de entrada/salida) para el filtro de ruido, Claude Sonnet 5 (USD 3 / 15) para el clasificador.
 
-**Riesgo identificado:** distinguir "consulta de facturación" de "disconformidad grave sobre facturación" es exactamente donde los modelos chicos flojean. Por eso el set de pruebas se construye y se corre **antes** de escribir el resto del sistema.
+**Riesgo identificado:** distinguir "consulta de facturación" de "disconformidad grave sobre facturación" es exactamente donde los modelos chicos flojean. Es la razón por la que el umbral separa la categoría "Tuyo" del promedio general en lugar de mirar solo el porcentaje agregado.
 
-**Nota operativa:** la RAM se comparte con el otro proyecto que usa Ollama en la misma máquina. Si ambos usan modelos distintos, Ollama los descarga y recarga alternadamente, con la demora consiguiente. Conviene que ambos proyectos compartan modelo si es posible.
-
-### 11.3 La suscripción de Claude Code no sirve como API
+### 11.7 La suscripción de Claude Code no sirve como API
 
 Se evaluó y se descartó. La suscripción de Claude Code paga uso interactivo; la API se factura por token en una cuenta separada. El modo headless (`claude -p`) sí corre contra la suscripción, pero no es base para un sistema desatendido: los límites están pensados para sesiones interactivas, cada llamada arrastra el arranque del CLI, y un ajuste de límites dejaría al sistema sin funcionar sin aviso.
 
@@ -282,7 +326,7 @@ El clasificador es una función pura, así que se testea de verdad.
 - Ese set corre completo cada vez que se agrega o modifica una regla, y cada vez que se cambia de modelo.
 - Si un cambio rompe un caso que antes acertaba, salta en el momento, no cuando el sistema le manda algo raro a un cliente.
 
-El set es además el árbitro de la decisión de modelo (sección 11.2), así que se construye primero.
+El set es además el banco de comparación entre proveedores (sección 11.4) y el árbitro de la decisión de modelo (sección 11.6), así que se construye temprano — pero no bloquea la construcción del sistema, porque la elección de proveedor es configuración y no código.
 
 ## 13. Datos
 
@@ -312,10 +356,15 @@ SQLite, un archivo, respaldable copiándolo.
 
 ## 16. Dependencias y orden
 
-1. **Bloqueante:** terminar el otro proyecto que está instalando Ollama en la misma Mac Mini, y acordar con ese proyecto qué modelo se comparte.
-2. Construir el set de pruebas con correos reales.
-3. Evaluar el modelo local contra el set y decidir el backend (sección 11.2).
-4. Recién ahí, implementar el resto del sistema.
+**No hay dependencias bloqueantes.** La independencia del proveedor (sección 11) hace que el sistema pueda construirse y probarse contra cualquier LLM disponible hoy, y que la elección definitiva se tome después, cambiando configuración.
+
+Orden de trabajo:
+
+1. Construir el set de pruebas con correos reales de JP y las decisiones correctas anotadas.
+2. Implementar el sistema contra el proveedor que esté disponible en ese momento — sirve cualquiera que cumpla el umbral en una prueba rápida.
+3. Cuando esté funcionando, correr el banco de comparación (sección 11.4) contra todos los candidatos y fijar la configuración definitiva.
+
+**Coordinación pendiente, no bloqueante:** hablar con el otro proyecto que está instalando Ollama en la misma Mac Mini para acordar qué modelo se comparte, y así evitar la recarga alternada descrita en la sección 11.5. Si esa conversación se demora, el proyecto avanza igual contra un proveedor remoto.
 
 ## 17. Stack
 
@@ -325,7 +374,7 @@ SQLite, un archivo, respaldable copiándolo.
 | Correo | `imap-tools` (lectura) + `smtplib` (envío) |
 | Base de datos | SQLite |
 | Bot | `python-telegram-bot` |
-| Clasificación | Ollama local (HTTP) o SDK `anthropic`, según `LLM_BACKEND` |
+| Clasificación | Adaptador `openai_compat` (cliente HTTP genérico, cubre Ollama/Groq/NVIDIA/etc.) o adaptador `anthropic` (SDK oficial). Ver sección 11 |
 | Configuración | `.env`, `roster.md`, `reglas.md`, `plantillas.md` |
 
 El sistema corre en la Mac Mini de JP. Se diseña portable —toda la configuración en archivos, ninguna ruta absoluta en el código— para que mudarlo a un servidor siempre encendido sea trivial si algún día hace falta.
