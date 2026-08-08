@@ -229,14 +229,37 @@ Respondé SOLO un objeto JSON, sin texto alrededor:
 {{"categoria":"<una de las seis>","motivo":"<máximo 12 palabras>","confianza":"alta|media|baja"}}"""
 
 
-def _pedir(req, intentos=6):
-    """Llama al proveedor tolerando límites de tasa.
+# Más allá de esto no es un límite pasajero sino cuota agotada: no tiene sentido
+# dormir, conviene cambiar de motor. Groq llegó a mandar Retry-After de 1462s.
+ESPERA_MAXIMA = 90
 
-    El nivel gratuito devuelve 429 si se lo satura. Respetamos la cabecera
-    Retry-After cuando viene, y si no, esperamos cada vez más. Los 5xx son
-    transitorios y se reintentan igual; los demás errores se propagan porque
-    reintentarlos no arregla nada.
+
+def motores():
+    """Motores de clasificación, en orden de preferencia.
+
+    El respaldo es opcional: si no está configurado, se trabaja con uno solo.
     """
+    lista = [(os.environ["LLM_CLASIFICADOR_BASE_URL"],
+              os.environ["LLM_CLASIFICADOR_API_KEY"],
+              os.environ["LLM_CLASIFICADOR_MODEL"])]
+    if os.environ.get("LLM_RESPALDO_MODEL"):
+        lista.append((os.environ["LLM_RESPALDO_BASE_URL"],
+                      os.environ["LLM_RESPALDO_API_KEY"],
+                      os.environ["LLM_RESPALDO_MODEL"]))
+    return lista
+
+
+def _pedir(base, key, cuerpo, intentos=4):
+    """Una petición a un motor, tolerando límites pasajeros.
+
+    Reintenta los 429 y los 5xx. Respeta Retry-After solo si la espera es
+    razonable: si el proveedor pide más que ESPERA_MAXIMA, la cuota está
+    agotada y quien llama debería probar otro motor en vez de dormirse.
+    """
+    req = urllib.request.Request(
+        base + "/chat/completions", data=cuerpo,
+        headers={**UA, "Authorization": "Bearer " + key,
+                 "Content-Type": "application/json"})
     for intento in range(intentos):
         try:
             with urllib.request.urlopen(req, timeout=60) as r:
@@ -244,29 +267,38 @@ def _pedir(req, intentos=6):
         except urllib.error.HTTPError as e:
             if e.code != 429 and e.code < 500:
                 raise
+            pedida = float(e.headers.get("Retry-After") or 0)
+            if pedida > ESPERA_MAXIMA:
+                raise RuntimeError(
+                    f"cuota agotada: el proveedor pide esperar {pedida:.0f}s") from e
             if intento == intentos - 1:
                 raise
-            espera = float(e.headers.get("Retry-After") or 0) or min(2 ** intento, 30)
+            espera = pedida or min(2 ** intento, 30)
             print(f"      (HTTP {e.code} — esperando {espera:.0f}s)", flush=True)
             time.sleep(espera + 0.5)
 
 
 def clasificar(sistema, correo):
-    payload = json.dumps({
-        "model": os.environ["LLM_CLASIFICADOR_MODEL"],
-        "messages": [
-            {"role": "system", "content": sistema},
-            {"role": "user", "content":
-             f"De: {correo['de']}\nPara: {correo['para']}\nCC: {correo['cc'] or '(nadie)'}\n"
-             f"Asunto: {correo['asunto']}\n\n{correo['cuerpo'][:1200]}"},
-        ],
-        "temperature": 0, "max_tokens": 500,
-    }).encode()
-    req = urllib.request.Request(
-        os.environ["LLM_CLASIFICADOR_BASE_URL"] + "/chat/completions", data=payload,
-        headers={**UA, "Authorization": "Bearer " + os.environ["LLM_CLASIFICADOR_API_KEY"],
-                 "Content-Type": "application/json"})
-    txt = _pedir(req)["choices"][0]["message"]["content"]
+    disponibles = motores()
+    for n, (base, key, modelo) in enumerate(disponibles):
+        cuerpo = json.dumps({
+            "model": modelo,
+            "messages": [
+                {"role": "system", "content": sistema},
+                {"role": "user", "content":
+                 f"De: {correo['de']}\nPara: {correo['para']}\nCC: {correo['cc'] or '(nadie)'}\n"
+                 f"Asunto: {correo['asunto']}\n\n{correo['cuerpo'][:1200]}"},
+            ],
+            "temperature": 0, "max_tokens": 500,
+        }).encode()
+        try:
+            txt = _pedir(base, key, cuerpo)["choices"][0]["message"]["content"]
+            break
+        except Exception as e:
+            if n == len(disponibles) - 1:
+                raise
+            print(f"      ({modelo} falló: {e} — paso al motor de respaldo)", flush=True)
+
     i, j = txt.find("{"), txt.rfind("}")
     try:
         return json.loads(txt[i:j + 1])
@@ -301,6 +333,20 @@ def main():
         "No muevo ni mando nada: esto es solo lectura."))
 
     offset, resultados, t_inicio = 0, [], time.time()
+
+    # Se guarda después de CADA respuesta, no al final. Las respuestas de JP son
+    # trabajo manual irrecuperable: si el proceso muere a mitad de camino —por
+    # cuota agotada, por un corte de red, por lo que sea— lo hecho queda en disco.
+    os.makedirs("datos", exist_ok=True)
+    sello = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    ruta = f"datos/simulacro-{sello}.json"
+
+    def guardar():
+        with open(ruta, "w", encoding="utf-8") as f:
+            json.dump({"fecha_utc": sello, "modelo": os.environ["LLM_CLASIFICADOR_MODEL"],
+                       "aciertos": sum(r["coincide"] for r in resultados),
+                       "total": len(resultados), "completo": len(resultados) == len(correos),
+                       "casos": resultados}, f, ensure_ascii=False, indent=2)
 
     for idx, c in enumerate(correos, 1):
         t0 = time.time()
@@ -340,6 +386,7 @@ def main():
                            "marcados_importantes": marcados,
                            "seg_clasificacion": round(t_clas, 2),
                            "seg_decision_jp": round(t_espera, 1)})
+        guardar()
         print(f"  {idx}/{len(correos)}  pred={pred['categoria']:<9} jp={eleccion:<9} "
               f"{'ok' if coincide else 'DIFIERE'}  ({t_clas:.1f}s clas, {t_espera:.0f}s vos)")
 
@@ -362,14 +409,6 @@ def main():
         f"⏱ Total: <b>{(time.time()-t_inicio)/60:.1f} min</b>\n\n"
         f"<b>Donde nos diferimos:</b>\n{detalle}\n\n"
         f"<i>Cada diferencia es una regla nueva. Nada se movió ni se envió.</i>"))
-
-    os.makedirs("datos", exist_ok=True)
-    sello = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-    ruta = f"datos/simulacro-{sello}.json"
-    with open(ruta, "w", encoding="utf-8") as f:
-        json.dump({"fecha_utc": sello, "modelo": os.environ["LLM_CLASIFICADOR_MODEL"],
-                   "aciertos": aciertos, "total": n, "casos": resultados},
-                  f, ensure_ascii=False, indent=2)
 
     print(f"\n  Coincidencias: {aciertos}/{n}")
     print(f"  Clasificación: {t_clas_prom:.1f}s por correo")
