@@ -7,14 +7,17 @@ los dos, no se deja la discrepancia.
 
 ## Convenciones que no son obvias
 
-**No usar "eval" en nombres de archivos, variables ni comandos.** Los permisos
-globales de este equipo incluyen `Bash(*eval*)` en la lista de denegación, para
-bloquear el `eval` de shell. La coincidencia es por subcadena, así que un
-archivo llamado `reevaluar.py` hace que se rechace **cualquier** comando que lo
-mencione, con un mensaje de permisos que no explica el motivo. En castellano
-esto es fácil de pisar: evaluar, evaluación, reevaluar. Usar "revisar",
-"contrastar" o "medir" en su lugar. Lo mismo aplica a `exec`, `production` y
-`sudo`, que también están en esa lista.
+**Cuidado con las palabras que contienen comandos peligrosos como subcadena.**
+Los permisos globales de este equipo deniegan por coincidencia de subcadena:
+`Bash(*exec*)`, `Bash(*production*)`, `Bash(*sudo*)`. Un archivo o comando que
+contenga esas letras se rechaza entero, con un mensaje de permisos que no
+explica el motivo y parece un problema del entorno.
+
+Ya pasó una vez con `Bash(*eval*)` y un archivo llamado `reevaluar.py`: tres
+bloqueos seguidos, incluido el comando para diagnosticarlos. Esa regla se afinó
+el 2026-08-08 a `Bash(eval)`, `Bash(eval *)`, `Bash(* eval *)` y las variantes
+tras `;`, `&&` y `|`, así que "evaluar" y "reevaluar" ya no molestan. Las otras
+tres siguen siendo por subcadena.
 
 **`.env` no se puede leer con las herramientas de archivo** (`Read(.env*)` está
 denegado, y está bien que lo esté). Para usar sus valores hay que exportarlos en
