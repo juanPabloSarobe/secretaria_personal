@@ -359,6 +359,16 @@ El clasificador es una función pura, así que se testea de verdad.
 
 El set es además el banco de comparación entre proveedores (sección 11.4) y el árbitro de la decisión de modelo (sección 11.6), así que se construye temprano — pero no bloquea la construcción del sistema, porque la elección de proveedor es configuración y no código.
 
+### 12.1 Validación del ciclo de aprendizaje (2026-08-08)
+
+Primera tanda real: 10 correos de la casilla, clasificados y corregidos por JP vía Telegram. Resultado inicial **7/10**. Los tres errores eran el mismo remitente (SiPago, la procesadora de cobros): dos clasificados como `RUIDO` cuando eran de Natalia, y uno escalado a `TUYO` porque el asunto decía "Reclamo" —que era un número de ticket del proveedor, no una queja de cliente.
+
+Escritas esas tres correcciones como reglas y reclasificados los mismos casos: **10/10, estable en 3 de 3 pasadas, sin regresiones**.
+
+**Qué demuestra y qué no.** Demuestra que el mecanismo funciona: una regla escrita cambia el comportamiento del clasificador y no rompe lo que ya acertaba. **No** demuestra que el clasificador haya mejorado en general — las reglas se derivaron de esos mismos correos, así que acertarlos después era casi inevitable. Medir sobre los casos que generaron la regla sobreestima el aprendizaje.
+
+**Consecuencia metodológica:** el progreso se mide sobre **tandas nuevas**, no reevaluando las viejas. La reevaluación sirve para detectar regresiones, que es un propósito distinto y también necesario. El set acumulado cumple las dos funciones, pero solo la primera medición de cada tanda cuenta como señal de calidad.
+
 ## 13. Datos
 
 SQLite, un archivo, respaldable copiándolo.
