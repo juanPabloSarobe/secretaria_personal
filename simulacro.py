@@ -15,13 +15,20 @@ import email, email.policy, email.utils, glob, hashlib, html, imaplib, json, os,
 import urllib.error, urllib.parse, urllib.request
 from datetime import datetime, timezone
 
-_args = sys.argv[1:]
-MOTOR = None
-if "--motor" in _args:
-    i = _args.index("--motor")
-    MOTOR = _args[i + 1] if i + 1 < len(_args) else None
-    del _args[i:i + 2]
-CANTIDAD = int(_args[0]) if _args else 10
+def parsear_argumentos(argv):
+    """(cantidad, motor) a partir de la línea de comandos."""
+    args = list(argv)
+    motor = None
+    if "--motor" in args:
+        i = args.index("--motor")
+        motor = args[i + 1] if i + 1 < len(args) else None
+        del args[i:i + 2]
+    return (int(args[0]) if args else 10), motor
+
+
+# Solo al ejecutarse como script: importado desde otra herramienta, los
+# argumentos de la línea de comandos son de ESA herramienta, no de esta.
+CANTIDAD, MOTOR = parsear_argumentos(sys.argv[1:]) if __name__ == "__main__" else (10, None)
 UA = {"User-Agent": "secretaria-personal/0.1"}  # sin esto, Cloudflare devuelve 403/1010
 
 CATEGORIAS = {
@@ -322,9 +329,12 @@ Clasificás su correo entrante.
 
 Categorías posibles:
 - RUIDO: sin ninguna consecuencia operativa (newsletters, publicidad, avisos informativos).
-- DELEGADO: es tema de Enzo o de Natalia, y esa casilla YA figura en Para o CC. No hay que hacer nada.
-- ENZO: es tema de Enzo y tecnicos@ NO está en los destinatarios. Hay que derivarlo.
-- NATALIA: es tema de Natalia y administracion@ NO está en los destinatarios. Hay que derivarlo.
+- DELEGADO: es tema de Enzo o de Natalia, y esa casilla YA figura en el hilo.
+  Mirá los TRES campos: De, Para y CC. Si el responsable es el REMITENTE, ya está
+  llevando el asunto y no hay nada que derivarle. Si JP solo figura en copia de
+  una conversación entre el equipo y el cliente, el correo no es para él.
+- ENZO: es tema de Enzo y tecnicos@ no aparece en De, ni en Para, ni en CC. Derivarlo.
+- NATALIA: es tema de Natalia y administracion@ no aparece en De, ni en Para, ni en CC. Derivarlo.
 - TUYO: escalación, conflicto, disconformidad, pedido de reunión con JP, desarrollo nuevo,
   o pedido de ayuda del equipo. Esta categoría PISA a las anteriores.
 - DUDA: no alcanza la información para decidir.

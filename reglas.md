@@ -99,3 +99,31 @@ demás se aprende.
 
   (aprendida 2026-08-08 — Carlos Bernardo Suhr, "Sulicitud": pedía algo y a la
   vez se despedía. JP lo marcó como suyo por lo segundo)
+
+- **LÍMITE IMPORTANTE: el agradecimiento tiene que estar dirigido a JP.** Si un
+  cliente agradece porque **un integrante del equipo le terminó un trabajo**, el
+  agradecimiento es para esa persona, no para JP. Eso es DELEGADO, no TUYO.
+
+  *Cómo distinguirlos:* preguntarse a quién le está hablando. Una despedida
+  general o un saludo a la empresa incluye a JP. Un "gracias" que responde a un
+  mensaje concreto de Natalia o de Enzo es de ellos.
+
+  (aprendida 2026-08-08 — María Fabián, "RE: CONTRATOS Y USUARIOS PARA BORRAR":
+  el clasificador aplicó la regla de cortesía de arriba y JP lo corrigió —
+  "no me respondió las gracias a mí sino a Natalia, se ve claro que Natalia
+  terminó un trabajo y se lo está informando")
+
+### Quién está en el hilo
+
+- **El responsable puede estar en el campo De, no solo en Para o CC.** Si el
+  correo lo manda `administracion@` o `tecnicos@`, esa persona ya está llevando
+  el asunto: es DELEGADO, y no hay nada que derivarle a quien ya está
+  escribiendo. Hay que mirar los tres campos, no dos.
+
+- **JP en copia de una conversación entre el equipo y el cliente no es JP
+  involucrado.** Es visibilidad, no un pedido. Categoría DELEGADO.
+
+  (aprendida 2026-08-08 — dos correos enviados por Natalia con JP en copia; el
+  clasificador dijo "administracion@ no está en Para ni en CC" sin advertir que
+  era la remitente. JP: "yo solo estoy en copia. Este es un ejemplo de cuando
+  estoy en copia de un pedido pero no es para mí")
