@@ -237,6 +237,24 @@ Así se llega al modo autónomo, pero con reglas que se ganaron el permiso.
 
 **Límite conocido:** si el responsable contesta solo al cliente sin copia a JP, el sistema es ciego a esa respuesta y va a alertar por un silencio que no existe. La derivación con copia a todos (sección 7) hace que esto sea el caso raro, no el caso común.
 
+### 9.1 Hilos que lleva JP en persona
+
+Las secciones anteriores tratan cada correo como un hecho aislado. Eso alcanza para el correo que entra por primera vez, y falla apenas hay conversación.
+
+**El error que produce:** un cliente escribe, JP le responde personalmente, el cliente contesta. Para un clasificador sin memoria de hilo, esa respuesta es un correo nuevo con tema de facturación, así que lo deriva a Natalia con copia a todos — y le anuncia al cliente que ahora lo atiende otra persona, en medio de una conversación que JP estaba llevando. Es de los errores más caros posibles y el diseño actual lo cometería sin dudar.
+
+**La corrección: estado de hilo.** El sistema registra, por hilo, quién actuó último y si JP lo está llevando. Un hilo pasa a estar "en manos de JP" cuando él manda un mensaje en él.
+
+| Situación | Comportamiento |
+|---|---|
+| Llega respuesta en un hilo que lleva JP | **No se deriva nunca.** Va al briefing como continuación |
+| JP quiere soltarlo | Botón en el briefing: "pasáselo a Natalia" |
+| JP respondió y no le contestan | Seguimiento por silencio, igual que con el equipo (sección 9) |
+
+**Consecuencia técnica: hay que leer la carpeta de enviados.** El sistema no puede saber que JP respondió si solo mira la bandeja de entrada. `INBOX.Sent` pasa a ser una fuente de datos del sistema, no solo la bandeja. Esto no estaba contemplado en la sección 5 y cambia el módulo `imap`.
+
+**Y el seguimiento por silencio se amplía:** hoy vigila lo que se derivó al equipo. Con esto vigila también lo que JP respondió y quedó sin contestar, que es un caso que él mencionó espontáneamente y que ninguna versión anterior del diseño cubría.
+
 ## 10. Telegram
 
 ### 10.1 Briefings
@@ -274,6 +292,16 @@ Solo interrumpe fuera de los briefings si se cumple alguna de estas tres condici
 ### 10.3 A demanda
 
 JP escribe `¿qué hay?` y recibe el estado actual al instante, sin esperar al briefing.
+
+### 10.4 Pedidos por Telegram (evaluado, priorizado)
+
+JP planteó poder pedirle cosas a la secretaria en vez de solo responderle. Son dos capacidades con perfiles de riesgo muy distintos, y conviene no tratarlas como una sola.
+
+**Buscar (solo lectura, entra temprano).** *"¿Qué me mandó Suhr la semana pasada?"*, *"buscá el mail que hablaba de las geocercas"*. IMAP tiene búsqueda nativa, no hay riesgo, y resuelve un problema concreto: consultar el correo desde el teléfono sin abrir el webmail. Barato de implementar y de alto valor; puede entrar antes que la Capa 2.
+
+**Dictar un mensaje (más adelante, y nunca automático).** *"Mandale a Fulano que el equipo 47 ya está reprogramado"*. Contra la intuición, esto es **menos riesgoso que las plantillas de derivación de la sección 7.1**: ahí el modelo redacta, acá JP dicta y el sistema transcribe. Son sus palabras.
+
+El riesgo real es la transcripción, no la redacción: si Whisper escucha "74" donde JP dijo "47", el error sale con su firma. Por eso **esta capacidad no se gradúa nunca** al modo autónomo de la sección 8.4 — siempre muestra el borrador exacto antes de enviar. La graduación tiene sentido para reglas que se repiten; un mensaje dictado es distinto cada vez y no hay patrón que pueda ganarse la confianza.
 
 ## 11. Motor de clasificación
 
