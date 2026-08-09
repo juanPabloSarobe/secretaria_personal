@@ -327,17 +327,40 @@ Clasificás su correo entrante.
 
 {reglas}
 
-Categorías posibles:
-- RUIDO: sin ninguna consecuencia operativa (newsletters, publicidad, avisos informativos).
-- DELEGADO: es tema de Enzo o de Natalia, y esa casilla YA figura en el hilo.
-  Mirá los TRES campos: De, Para y CC. Si el responsable es el REMITENTE, ya está
-  llevando el asunto y no hay nada que derivarle. Si JP solo figura en copia de
-  una conversación entre el equipo y el cliente, el correo no es para él.
-- ENZO: es tema de Enzo y tecnicos@ no aparece en De, ni en Para, ni en CC. Derivarlo.
-- NATALIA: es tema de Natalia y administracion@ no aparece en De, ni en Para, ni en CC. Derivarlo.
-- TUYO: escalación, conflicto, disconformidad, pedido de reunión con JP, desarrollo nuevo,
-  o pedido de ayuda del equipo. Esta categoría PISA a las anteriores.
-- DUDA: no alcanza la información para decidir.
+PROCEDIMIENTO. Contestá estas preguntas EN ESTE ORDEN y frená en la primera que
+dé resultado. El orden no es una sugerencia: una pregunta posterior nunca revierte
+lo que decidió una anterior.
+
+PASO 1 — ¿Quién ESCRIBE el correo?
+  Si el remitente es del dominio fullcontrolgps.com.ar (Enzo, Natalia, o cualquier
+  casilla propia), entonces el equipo YA está actuando sobre este asunto. La
+  respuesta es DELEGADO y terminás acá.
+  Esto vale aunque el texto sea una despedida, un agradecimiento o algo cariñoso:
+  esa cortesía ya la escribió el equipo, no hay nada que JP tenga que agregar.
+  ÚNICA EXCEPCIÓN: que le pidan ayuda a JP de forma explícita. Entonces es TUYO.
+
+PASO 2 — ¿Alguien tiene que HACER algo por este correo?
+  Si nadie tiene que hacer nada, es RUIDO y terminás acá: publicidad, ventas
+  frías, boletines, invitaciones a eventos, avisos de mantenimiento programado
+  de proveedores. Que el texto use vocabulario técnico o mencione dinero no lo
+  saca de acá; lo que decide es si hay una acción pendiente para alguien.
+  Cuidado: un pago rechazado o una factura con problema SÍ exigen acción, así
+  que esos no son ruido.
+
+PASO 3 — ¿El correo es para JP, o es una escalación?
+  Conflicto, disconformidad, pedido de reunión de alguien CON relación previa,
+  desarrollo nuevo, despedida o agradecimiento dirigido a JP, o un asunto de la
+  lista de personales. Si es así: TUYO, sin importar el tema.
+
+PASO 4 — ¿De qué se trata, y quién ya está en el hilo?
+  Determiná el responsable por el tema (Enzo o Natalia). Después fijate si su
+  casilla aparece en De, en Para o en CC.
+    - Aparece en alguno de los tres  -> DELEGADO
+    - No aparece en ninguno          -> ENZO o NATALIA, según corresponda
+
+PASO 5 — Si no alcanza la información para decidir: DUDA.
+
+Categorías: RUIDO, DELEGADO, ENZO, NATALIA, TUYO, DUDA.
 
 Respondé SOLO un objeto JSON, sin texto alrededor:
 {{"categoria":"<una de las seis>","motivo":"<máximo 12 palabras>","confianza":"alta|media|baja"}}"""

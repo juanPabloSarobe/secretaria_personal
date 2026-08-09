@@ -432,6 +432,27 @@ Escritas esas tres correcciones como reglas y reclasificados los mismos casos: *
 
 **Consecuencia metodológica:** el progreso se mide sobre **tandas nuevas**, no reevaluando las viejas. La reevaluación sirve para detectar regresiones, que es un propósito distinto y también necesario. El set acumulado cumple las dos funciones, pero solo la primera medición de cada tanda cuenta como señal de calidad.
 
+### 12.2 Las reglas se pisan entre sí, y antes de lo previsto
+
+La sección 8.1 anticipaba que el archivo de reglas necesitaría poda "a los meses". En la práctica el problema apareció **el primer día**, con quince reglas escritas.
+
+Secuencia observada el 2026-08-08, cada paso verificado con el revisor de regresiones:
+
+| Cambio | Arregló | Rompió |
+|---|---|---|
+| Regla de cortesía (despedidas) | 1 caso | Un "gracias" dirigido a Natalia |
+| Acotarla a lo dirigido a JP | ese caso | — |
+| Regla de despedida + procedimiento ordenado | la despedida saliente | 2 casos de RUIDO |
+| Mover RUIDO al paso 2 | esos 2 | — |
+
+Dos aprendizajes que valen más que las reglas mismas:
+
+**1. La prosa no resuelve conflictos entre reglas.** Cuando dos reglas del archivo aplicaban al mismo correo, el clasificador elegía distinto en cada pasada — un caso dio 1 de 3 con temperatura 0. Agregar más prosa aclaratoria no lo estabilizó. Lo que sí funcionó fue mover la decisión al **procedimiento ordenado del prompt**: pasos numerados, con corte explícito en el primero que aplica. Las reglas del archivo describen *casos*; el orden de evaluación es **estructura y va en el código**.
+
+**2. El orden importa más que el contenido.** Poner RUIDO como último paso hizo que el modelo buscara un responsable por tema antes de preguntarse si el correo importaba, y le asignara un área a una publicidad. Moverlo al paso 2 arregló dos casos sin tocar una sola regla.
+
+**Consecuencia para el diseño:** el ciclo de aprendizaje de la sección 8 necesita el revisor de regresiones como parte obligatoria, no opcional. Escribir una regla sin correr el set acumulado significa arreglar un caso y romper otros en silencio. Eso ya pasó tres veces en un día.
+
 ## 13. Datos
 
 SQLite, un archivo, respaldable copiándolo.

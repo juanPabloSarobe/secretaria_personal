@@ -113,6 +113,45 @@ demás se aprende.
   "no me respondió las gracias a mí sino a Natalia, se ve claro que Natalia
   terminó un trabajo y se lo está informando")
 
+- **LÍMITE: la regla de cortesía solo aplica a lo que ENTRA.** Si el remitente
+  es del propio dominio `fullcontrolgps.com.ar`, la despedida o el agradecimiento
+  ya lo escribió el equipo. Eso es DELEGADO, nunca TUYO, por cariñoso que sea el
+  texto.
+
+  (aprendida 2026-08-08 — Natalia escribiéndole a un cliente que se iba: "te
+  vamos a extrañar un montonnnn, te queremosss". El clasificador leyó la
+  despedida y la marcó como de JP. La despedida que importa es la que llega,
+  no la que sale)
+
+### Reuniones: quién la pide importa más que el pedido
+
+- Un **pedido de reunión dispara la regla de escalación solo si viene de un
+  cliente, un proveedor con relación, o alguien conocido**. Una venta fría que
+  ofrece un producto y pide "una breve reunión informativa para comentarles
+  nuestros beneficios" es **RUIDO**, no una reunión.
+
+  *Cómo distinguirlos:* preguntarse si hay una relación previa. Un cliente pide
+  reunión sobre algo que ya existe entre las partes. Un vendedor pide reunión
+  para crear una relación que todavía no hay.
+
+  (aprendida 2026-08-08 — Medife ofreciendo cobertura médica corporativa; el
+  clasificador lo escaló a JP por el pedido de reunión, JP lo marcó como ruido)
+
+### Notificaciones de proveedores de servicios
+
+- Los **avisos de mantenimiento programado, cortes anunciados y cambios de
+  infraestructura** de proveedores (telefonía, conectividad, plataformas) son
+  **RUIDO**, aunque estén llenos de vocabulario técnico. No hay nada que hacer:
+  son informativos.
+
+  *Contraste con la regla de SiPago:* una factura rechazada exige una acción y
+  por eso no es ruido. Un aviso de mantenimiento no exige ninguna. La pregunta
+  no es si el tema es técnico, sino si alguien tiene que hacer algo.
+
+  (aprendida 2026-08-08 — Telefónica, "NOTIFICACION CRQ000000843789": tareas de
+  mantenimiento programado. El clasificador lo derivó a Enzo por el vocabulario
+  técnico, JP lo marcó como ruido)
+
 ### Quién está en el hilo
 
 - **El responsable puede estar en el campo De, no solo en Para o CC.** Si el
