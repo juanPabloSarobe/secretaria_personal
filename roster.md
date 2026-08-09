@@ -39,6 +39,20 @@ sobre esa misma factura es de JP. La escalación pisa al tema.
 
 ---
 
+# Asuntos personales de JP
+
+La casilla institucional también recibe correo que **no es de la empresa**: son
+asuntos privados de JP que le llegan ahí. El sistema no tiene forma de deducirlo
+del contenido —una notificación municipal sobre pavimentación se parece mucho a
+un trámite corporativo— así que se aprende marcándolo.
+
+Todo lo de esta lista es **TUYO**, nunca se deriva a Enzo ni a Natalia, y nunca
+es ruido.
+
+- Municipalidad de Neuquén (`neuquencapital.gov.ar`) — trámites y notificaciones
+  particulares de JP, no de Full Control GPS
+  <!-- marcado 2026-08-08, explicado por JP -->
+
 # Clientes importantes
 
 Correos de estos remitentes habilitan alerta fuera de horario, aunque el tema

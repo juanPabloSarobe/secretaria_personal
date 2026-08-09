@@ -54,6 +54,21 @@ demás se aprende.
   separado, preguntando.
   (decidido 2026-08-08 por JP, al revisar la generalización propuesta)
 
+### Correo personal en la casilla de trabajo
+
+- Si el remitente o el asunto figura en la sección **"Asuntos personales de JP"**
+  del roster, la categoría es **TUYO**. No se deriva a nadie y no es ruido,
+  aunque tenga forma de trámite corporativo.
+
+  *Por qué:* la casilla institucional también recibe asuntos privados de JP.
+  Nada en el texto permite distinguirlos —una notificación municipal sobre
+  obra pública se lee igual sea personal o de la empresa— así que **esto no se
+  deduce, se aprende marcándolo**. Ante un remitente parecido que no esté en la
+  lista, preguntar en vez de suponer.
+
+  (aprendida 2026-08-08 — explicada por JP: los avisos de la Municipalidad de
+  Neuquén sobre pavimentación son suyos como vecino, no de Full Control GPS)
+
 ### Mensajes de cortesía y de vínculo personal
 
 - Si el correo es una **despedida, un agradecimiento, una felicitación, un
@@ -77,3 +92,10 @@ demás se aprende.
   (aprendida 2026-08-08 — explicada por JP: un operador de un cliente se
   despedía porque lo pasaban a otro sector, mandaba saludos y buenos augurios;
   Natalia y Enzo estaban en copia y Natalia ya había respondido)
+
+- **La despedida gana aunque el correo además pida algo.** Un mensaje puede
+  traer un pedido concreto *y* una despedida en el mismo texto. El pedido se
+  deriva a quien corresponda, pero el saludo sigue siendo de JP.
+
+  (aprendida 2026-08-08 — Carlos Bernardo Suhr, "Sulicitud": pedía algo y a la
+  vez se despedía. JP lo marcó como suyo por lo segundo)
