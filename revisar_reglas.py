@@ -10,22 +10,35 @@ lo que ya andaba.
 Corre cada caso varias veces, porque una sola pasada no es concluyente
 ni siquiera con temperature 0.
 
-Uso:  python3 reevaluar.py [archivo.json] [pasadas]
+Uso:  python3 revisar_reglas.py [archivo.json] [pasadas] [--motor groq|nvidia|ollama]
+
+Conviene correrlo contra un motor que NO sea el de producción: revisar N casos
+por M pasadas consume mucha más cuota que la operación normal de un día entero,
+y agotar el motor principal deja a la secretaria muda.
 """
-import glob, json, os, sys
+import glob, json, sys
 from collections import Counter
+import os.path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from simulacro import clasificar, prompt_sistema  # noqa: E402
+from simulacro import clasificar, motores, prompt_sistema  # noqa: E402
 
-ruta = sys.argv[1] if len(sys.argv) > 1 else sorted(glob.glob("datos/simulacro-*.json"))[-1]
-PASADAS = int(sys.argv[2]) if len(sys.argv) > 2 else 3
+_args = sys.argv[1:]
+MOTOR = None
+if "--motor" in _args:
+    i = _args.index("--motor")
+    MOTOR = _args[i + 1] if i + 1 < len(_args) else None
+    del _args[i:i + 2]
+
+ruta = _args[0] if _args else sorted(glob.glob("datos/simulacro-*.json"))[-1]
+PASADAS = int(_args[1]) if len(_args) > 1 else 3
 
 d = json.load(open(ruta, encoding="utf-8"))
 sistema = prompt_sistema()
+cadena = motores(MOTOR)
 
 print(f"archivo : {ruta}")
-print(f"modelo  : {os.environ['LLM_CLASIFICADOR_MODEL']}")
+print("motores : " + " → ".join(f"{n} ({m})" for n, _, _, m in cadena))
 print(f"pasadas : {PASADAS} por caso\n")
 print(f"{'#':<3} {'JP dijo':<9} {'antes':<9} {'ahora':<9} {'estable':<8} resultado")
 print("-" * 72)
@@ -38,7 +51,7 @@ for i, c in enumerate(d["casos"], 1):
     votos = Counter()
     for _ in range(PASADAS):
         try:
-            votos[clasificar(sistema, correo)["categoria"]] += 1
+            votos[clasificar(sistema, correo, MOTOR)["categoria"]] += 1
         except Exception as e:                  # un fallo aislado no tira la corrida
             print(f"{i:<3} error en una pasada: {type(e).__name__}")
     if not votos:

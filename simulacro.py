@@ -9,13 +9,19 @@ clasificador y guarda todo.
 NO mueve correos. NO envía correos. NO modifica la casilla de ninguna forma.
 Lo único que sale hacia afuera son mensajes de Telegram para vos.
 
-Uso:  python3 simulacro.py [cantidad]
+Uso:  python3 simulacro.py [cantidad] [--motor groq|nvidia|ollama]
 """
 import email, email.policy, email.utils, glob, hashlib, html, imaplib, json, os, re, sys, time
 import urllib.error, urllib.parse, urllib.request
 from datetime import datetime, timezone
 
-CANTIDAD = int(sys.argv[1]) if len(sys.argv) > 1 else 10
+_args = sys.argv[1:]
+MOTOR = None
+if "--motor" in _args:
+    i = _args.index("--motor")
+    MOTOR = _args[i + 1] if i + 1 < len(_args) else None
+    del _args[i:i + 2]
+CANTIDAD = int(_args[0]) if _args else 10
 UA = {"User-Agent": "secretaria-personal/0.1"}  # sin esto, Cloudflare devuelve 403/1010
 
 CATEGORIAS = {
@@ -331,19 +337,43 @@ Respondé SOLO un objeto JSON, sin texto alrededor:
 # dormir, conviene cambiar de motor. Groq llegó a mandar Retry-After de 1462s.
 ESPERA_MAXIMA = 90
 
+# Catálogo de motores. El .env guarda las credenciales de TODOS a la vez;
+# elegir cuál se usa es una decisión del código, no un archivo que haya que
+# reescribir cada vez.  nombre -> (var de URL, var de clave, modelo)
+MOTORES = {
+    "groq":   ("GROQ_BASE_URL",   "GROQ_API_KEY",   "llama-3.3-70b-versatile"),
+    "nvidia": ("NVIDIA_BASE_URL", "NVIDIA_API_KEY", "nvidia/nemotron-3-super-120b-a12b"),
+    "ollama": ("OLLAMA_BASE_URL", "OLLAMA_API_KEY", "qwen3:30b-a3b"),
+}
 
-def motores():
-    """Motores de clasificación, en orden de preferencia.
+# Orden de uso: el primero es el principal y los siguientes son respaldo
+# automático cuando el anterior agota su cuota. Se puede anteponer uno desde
+# la línea de comandos con --motor <nombre>.
+PREFERENCIA = ["groq", "nvidia", "ollama"]
 
-    El respaldo es opcional: si no está configurado, se trabaja con uno solo.
+
+def motores(preferido=None):
+    """Motores disponibles, en orden de uso.
+
+    Descarta los que no tengan credenciales cargadas, así el catálogo puede
+    listar más proveedores de los que estén configurados en esta máquina.
     """
-    lista = [(os.environ["LLM_CLASIFICADOR_BASE_URL"],
-              os.environ["LLM_CLASIFICADOR_API_KEY"],
-              os.environ["LLM_CLASIFICADOR_MODEL"])]
-    if os.environ.get("LLM_RESPALDO_MODEL"):
-        lista.append((os.environ["LLM_RESPALDO_BASE_URL"],
-                      os.environ["LLM_RESPALDO_API_KEY"],
-                      os.environ["LLM_RESPALDO_MODEL"]))
+    orden = list(PREFERENCIA)
+    if preferido:
+        if preferido not in MOTORES:
+            raise SystemExit(f"motor desconocido: {preferido}. "
+                             f"Opciones: {', '.join(MOTORES)}")
+        orden.remove(preferido)
+        orden.insert(0, preferido)
+
+    lista = []
+    for nombre in orden:
+        var_url, var_key, modelo = MOTORES[nombre]
+        url = os.environ.get(var_url)
+        if url:
+            lista.append((nombre, url, os.environ.get(var_key, ""), modelo))
+    if not lista:
+        raise SystemExit("no hay ningún motor configurado en el .env")
     return lista
 
 
@@ -376,9 +406,9 @@ def _pedir(base, key, cuerpo, intentos=4):
             time.sleep(espera + 0.5)
 
 
-def clasificar(sistema, correo):
-    disponibles = motores()
-    for n, (base, key, modelo) in enumerate(disponibles):
+def clasificar(sistema, correo, preferido=None):
+    disponibles = motores(preferido)
+    for n, (nombre, base, key, modelo) in enumerate(disponibles):
         cuerpo = json.dumps({
             "model": modelo,
             "messages": [
@@ -401,7 +431,7 @@ def clasificar(sistema, correo):
         except Exception as e:
             if n == len(disponibles) - 1:
                 raise
-            print(f"      ({modelo} falló: {e} — paso al motor de respaldo)", flush=True)
+            print(f"      ({nombre} falló: {e} — paso a {disponibles[n+1][0]})", flush=True)
 
     i, j = txt.find("{"), txt.rfind("}")
     try:
@@ -421,6 +451,11 @@ def main():
 
     chat = os.environ["TELEGRAM_CHAT_ID"]
     sistema = prompt_sistema()
+
+    cadena = motores(MOTOR)
+    modelo_en_uso = cadena[0][3]
+    print("Motores, en orden de uso: "
+          + " → ".join(f"{n} ({m})" for n, _, _, m in cadena))
 
     print(f"Trayendo los últimos {CANTIDAD} correos (sin marcarlos como leídos)…")
     traidos = traer_correos(CANTIDAD)
@@ -459,14 +494,14 @@ def main():
 
     def guardar():
         with open(ruta, "w", encoding="utf-8") as f:
-            json.dump({"fecha_utc": sello, "modelo": os.environ["LLM_CLASIFICADOR_MODEL"],
+            json.dump({"fecha_utc": sello, "modelo": modelo_en_uso,
                        "aciertos": sum(r["coincide"] for r in resultados),
                        "total": len(resultados), "completo": len(resultados) == len(correos),
                        "casos": resultados}, f, ensure_ascii=False, indent=2)
 
     for idx, c in enumerate(correos, 1):
         t0 = time.time()
-        pred = clasificar(sistema, c)
+        pred = clasificar(sistema, c, MOTOR)
         t_clas = time.time() - t0
 
         cuerpo = recortar(c["cuerpo"].replace("\r", ""), 600)
