@@ -11,7 +11,7 @@ Lo único que sale hacia afuera son mensajes de Telegram para vos.
 
 Uso:  python3 simulacro.py [cantidad]
 """
-import email, email.policy, email.utils, html, imaplib, json, os, re, sys, time
+import email, email.policy, email.utils, glob, hashlib, html, imaplib, json, os, re, sys, time
 import urllib.error, urllib.parse, urllib.request
 from datetime import datetime, timezone
 
@@ -251,6 +251,33 @@ def texto_plano(msg):
     return cuerpo.strip()
 
 
+def identidad(c):
+    """Identificador estable de un correo.
+
+    El Message-ID es lo correcto, pero no todos los remitentes automáticos lo
+    mandan. Sin una reserva, esos correos se preguntan una y otra vez en cada
+    tanda. El resumen de remitente + asunto + fecha alcanza para reconocerlos.
+    """
+    mid = (c.get("message_id") or "").strip()
+    if mid:
+        return mid
+    semilla = f"{c.get('de','')}|{c.get('asunto','')}|{c.get('fecha','')}"
+    return "sha:" + hashlib.sha256(semilla.encode("utf-8")).hexdigest()[:32]
+
+
+def ids_respondidos():
+    """Correos que JP ya clasificó en tandas anteriores."""
+    vistos = set()
+    for ruta in glob.glob("datos/simulacro-*.json"):
+        try:
+            d = json.load(open(ruta, encoding="utf-8"))
+        except Exception:
+            continue
+        for c in d.get("casos", []):
+            vistos.add(identidad(c))
+    return vistos
+
+
 def traer_correos(n):
     M = imaplib.IMAP4_SSL(os.environ["IMAP_HOST"], int(os.environ["IMAP_PORT"]), timeout=40)
     M.login(os.environ["IMAP_USER"], os.environ["IMAP_PASSWORD"])
@@ -360,10 +387,16 @@ def clasificar(sistema, correo):
                  f"De: {correo['de']}\nPara: {correo['para']}\nCC: {correo['cc'] or '(nadie)'}\n"
                  f"Asunto: {correo['asunto']}\n\n{correo['cuerpo'][:1200]}"},
             ],
-            "temperature": 0, "max_tokens": 500,
+            # 3000 y no 500: los modelos de razonamiento gastan tokens pensando
+            # antes de escribir, y con un presupuesto corto se cortan justo antes
+            # del JSON. Los modelos comunes paran solos mucho antes, así que no
+            # cuesta nada dejarles margen.
+            "temperature": 0, "max_tokens": 3000,
         }).encode()
         try:
-            txt = _pedir(base, key, cuerpo)["choices"][0]["message"]["content"]
+            msg = _pedir(base, key, cuerpo)["choices"][0]["message"]
+            # algunos modelos dejan content en null y ponen todo en reasoning_content
+            txt = msg.get("content") or msg.get("reasoning_content") or ""
             break
         except Exception as e:
             if n == len(disponibles) - 1:
@@ -390,8 +423,18 @@ def main():
     sistema = prompt_sistema()
 
     print(f"Trayendo los últimos {CANTIDAD} correos (sin marcarlos como leídos)…")
-    correos = traer_correos(CANTIDAD)
-    print(f"  {len(correos)} correos leídos.\n")
+    traidos = traer_correos(CANTIDAD)
+
+    # No volver a preguntar por lo ya respondido. "Los últimos 20" incluye a
+    # "los últimos 10", así que sin esto cada tanda repite la anterior entera.
+    ya = ids_respondidos()
+    correos = [c for c in traidos if identidad(c) not in ya]
+    repetidos = len(traidos) - len(correos)
+    print(f"  {len(traidos)} leídos, {repetidos} ya respondidos antes, "
+          f"{len(correos)} para revisar.\n")
+    if not correos:
+        print("  No hay nada nuevo. Probá con un número mayor.")
+        return
 
     tg("sendMessage", chat_id=chat, parse_mode="HTML", text=(
         f"🧪 <b>Simulacro — {len(correos)} correos</b>\n\n"
