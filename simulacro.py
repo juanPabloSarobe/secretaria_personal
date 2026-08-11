@@ -279,6 +279,41 @@ def pedir_explicacion(idx, offset, esperado, dicho):
                 return texto, offset
 
 
+# ------------------------------------------------------------------ Códigos convenidos
+def _sin_acentos(s):
+    tabla = str.maketrans("áéíóúüñÁÉÍÓÚÜÑ", "aeiouunAEIOUUN")
+    return s.translate(tabla).lower()
+
+
+def codigos_convenidos():
+    """Frases que JP le pide a sus contactos para marcar que él pidió el correo."""
+    try:
+        texto = open("codigos.md", encoding="utf-8").read()
+    except FileNotFoundError:
+        return []
+    frases = []
+    for linea in texto.splitlines():
+        linea = linea.strip()
+        if linea.startswith("- ") and len(linea) > 6:
+            frases.append(_sin_acentos(linea[2:].strip()))
+    return frases
+
+
+def tiene_codigo(correo, frases):
+    """¿El correo trae alguna frase convenida? Comprobación literal.
+
+    A propósito NO pasa por el modelo. Un correo que continúa una charla de
+    JP se lee igual que publicidad no solicitada, y ese es justamente el caso
+    que no puede quedar librado a criterio: si la frase está, es de JP y
+    punto. Una comparación de texto no tiene pasadas ni desacuerdos.
+    """
+    donde = _sin_acentos(f"{correo.get('asunto','')} {correo.get('cuerpo','')}")
+    for f in frases:
+        if f in donde:
+            return f
+    return None
+
+
 # ------------------------------------------------------------------ Ruido conocido
 # Dominios de correo personal: jamás se pueden dar por ruido en bloque, porque
 # el mismo dominio trae publicidad y clientes. En los datos, gmail.com ya
@@ -472,12 +507,18 @@ def traer_correos(n):
 def prompt_sistema():
     roster = open("roster.md", encoding="utf-8").read()
     reglas = open("reglas.md", encoding="utf-8").read()
+    try:
+        codigos = open("codigos.md", encoding="utf-8").read()
+    except FileNotFoundError:
+        codigos = ""
     return f"""Sos la secretaria de Juan Pablo Sarobe (JP), director de Full Control GPS.
 Clasificás su correo entrante.
 
 {roster}
 
 {reglas}
+
+{codigos}
 
 PROCEDIMIENTO. Contestá estas preguntas EN ESTE ORDEN y frená en la primera que
 dé resultado. El orden no es una sugerencia: una pregunta posterior nunca revierte
@@ -767,10 +808,19 @@ def main():
               f"{len(doms_ruido)} dominio(s)\n")
     automaticos = []
 
+    frases = codigos_convenidos()
+    if frases:
+        print(f"Códigos convenidos activos: {len(frases)}\n")
+
     for idx, c in enumerate(correos, 1):
+        # Un código convenido gana sobre todo: JP pidió ese correo, y ninguna
+        # heurística de ruido debería poder taparlo.
+        codigo = tiene_codigo(c, frases)
+
         # Atajo sin LLM: si JP ya marcó este remitente como ruido dos veces o
         # más, y nunca de otra forma, no hace falta preguntárselo de nuevo.
-        motivo_auto = None if protegido(c) else es_ruido_conocido(c, dirs_ruido, doms_ruido)
+        motivo_auto = (None if (protegido(c) or codigo)
+                       else es_ruido_conocido(c, dirs_ruido, doms_ruido))
         if motivo_auto and random.randrange(MUESTREO_CONTROL):   # 1 de cada N igual se pregunta
             automaticos.append((c, f"ruido conocido — {motivo_auto}"))
             resultados.append({**{k: c[k] for k in
@@ -787,15 +837,21 @@ def main():
             continue
 
         t0 = time.time()
-        try:
-            pred = clasificar(sistema, c, MOTOR)
-        except Exception as e:
-            # Que se caigan TODOS los motores no puede costar la tanda. Lo
-            # valioso de cada correo es el criterio de JP, no mi opinión: se lo
-            # muestro igual y su respuesta queda registrada como siempre.
-            print(f"      (sin clasificar: {e})", flush=True)
-            pred = {"categoria": "ERROR", "confianza": "baja",
-                    "motivo": f"ningún motor respondió ({type(e).__name__})"}
+        if codigo:
+            # Sin consultar al modelo: la frase está o no está.
+            pred = {"categoria": "TUYO", "confianza": "alta", "unanime": True,
+                    "motivo": f"código convenido: «{codigo}»", "pasadas": 0}
+            print(f"      [código] «{codigo}» — es tuyo sin discusión", flush=True)
+        else:
+            try:
+                pred = clasificar(sistema, c, MOTOR)
+            except Exception as e:
+                # Que se caigan TODOS los motores no puede costar la tanda. Lo
+                # valioso de cada correo es el criterio de JP, no mi opinión: se
+                # lo muestro igual y su respuesta queda registrada como siempre.
+                print(f"      (sin clasificar: {e})", flush=True)
+                pred = {"categoria": "ERROR", "confianza": "baja",
+                        "motivo": f"ningún motor respondió ({type(e).__name__})"}
         t_clas = time.time() - t0
 
         # Segundo atajo: el clasificador lleva 32 aciertos de 32 detectando
