@@ -11,7 +11,7 @@ Lo único que sale hacia afuera son mensajes de Telegram para vos.
 
 Uso:  python3 simulacro.py [cantidad] [--motor groq|nvidia|ollama]
 """
-import email, email.policy, email.utils, glob, hashlib, html, imaplib, json, os, re, sys, time
+import email, email.policy, email.utils, glob, hashlib, html, imaplib, json, os, random, re, sys, time
 from collections import Counter
 import urllib.error, urllib.parse, urllib.request
 from datetime import datetime, timezone
@@ -277,6 +277,80 @@ def pedir_explicacion(idx, offset, esperado, dicho):
                          parse_mode="HTML",
                          text=f"🎙 Te entendí: <i>{html.escape(texto)}</i>")
                 return texto, offset
+
+
+# ------------------------------------------------------------------ Ruido conocido
+# Dominios de correo personal: jamás se pueden dar por ruido en bloque, porque
+# el mismo dominio trae publicidad y clientes. En los datos, gmail.com ya
+# aparece mezclado entre RUIDO y NATALIA.
+DOMINIOS_GENERICOS = {"gmail.com", "hotmail.com", "yahoo.com", "yahoo.com.ar",
+                      "outlook.com", "live.com", "icloud.com", "aol.com"}
+
+# Cuántas veces JP tiene que haber marcado lo mismo antes de automatizarlo.
+MARCAS_PARA_AUTOMATIZAR = 2
+
+# De cada cuántos correos auto-clasificados se muestra uno igual, para no perder
+# de vista si el criterio se degrada. Sin esto, automatizar es dejar de medir.
+MUESTREO_CONTROL = 4
+
+
+def remitentes_ruido():
+    """Remitentes y dominios que JP marcó siempre como RUIDO.
+
+    Solo cuenta lo que él decidió a mano, y solo si NUNCA los clasificó de otra
+    forma. Un remitente mezclado queda afuera: en los datos, orbcomm.com llegó
+    con RUIDO unas veces y TUYO otras, y automatizarlo habría escondido correos
+    suyos.
+    """
+    direcciones, dominios = {}, {}
+    for ruta in glob.glob("datos/simulacro-*.json"):
+        try:
+            d = json.load(open(ruta, encoding="utf-8"))
+        except Exception:
+            continue
+        for c in d.get("casos", []):
+            _, dire = email.utils.parseaddr(c.get("de", ""))
+            dire = dire.lower().strip()
+            if not dire or "@" not in dire:
+                continue
+            direcciones.setdefault(dire, []).append(c.get("correcto"))
+            dom = dire.split("@")[1]
+            if dom not in DOMINIOS_GENERICOS:
+                dominios.setdefault(dom, []).append(c.get("correcto"))
+
+    def uniformes(mapa):
+        return {k for k, v in mapa.items()
+                if len(v) >= MARCAS_PARA_AUTOMATIZAR and set(v) == {"RUIDO"}}
+
+    return uniformes(direcciones), uniformes(dominios)
+
+
+def es_ruido_conocido(correo, direcciones, dominios):
+    """¿JP ya dijo, repetidamente, que este remitente es ruido?"""
+    _, dire = email.utils.parseaddr(correo.get("de", ""))
+    dire = dire.lower().strip()
+    if not dire or "@" not in dire:
+        return None
+    if dire in direcciones:
+        return f"remitente {dire}"
+    dom = dire.split("@")[1]
+    if dom in dominios:
+        return f"dominio {dom}"
+    return None
+
+
+def protegido(correo):
+    """Remitentes que nunca se automatizan, por más que parezcan ruido.
+
+    Los clientes importantes y los asuntos personales están en el roster
+    justamente porque JP no quiere perdérselos.
+    """
+    roster = open("roster.md", encoding="utf-8").read().lower()
+    _, dire = email.utils.parseaddr(correo.get("de", ""))
+    dire = dire.lower().strip()
+    if not dire or "@" not in dire:
+        return False
+    return dire in roster or dire.split("@")[1] in roster
 
 
 # ------------------------------------------------------------------ Roster
@@ -687,7 +761,31 @@ def main():
                        "total": len(resultados), "completo": len(resultados) == len(correos),
                        "casos": resultados}, f, ensure_ascii=False, indent=2)
 
+    dirs_ruido, doms_ruido = remitentes_ruido()
+    if dirs_ruido or doms_ruido:
+        print(f"Ruido conocido: {len(dirs_ruido)} remitente(s), "
+              f"{len(doms_ruido)} dominio(s)\n")
+    automaticos = []
+
     for idx, c in enumerate(correos, 1):
+        # Atajo sin LLM: si JP ya marcó este remitente como ruido dos veces o
+        # más, y nunca de otra forma, no hace falta preguntárselo de nuevo.
+        motivo_auto = None if protegido(c) else es_ruido_conocido(c, dirs_ruido, doms_ruido)
+        if motivo_auto and random.randrange(MUESTREO_CONTROL):   # 1 de cada N igual se pregunta
+            automaticos.append((c, f"ruido conocido — {motivo_auto}"))
+            resultados.append({**{k: c[k] for k in
+                                  ("uid", "de", "para", "cc", "asunto", "fecha", "message_id")},
+                               "cuerpo": c["cuerpo"][:4000],
+                               "prediccion": {"categoria": "RUIDO",
+                                              "motivo": motivo_auto, "confianza": "alta"},
+                               "correcto": "RUIDO", "coincide": True,
+                               "automatico": motivo_auto,
+                               "explicacion_jp": None, "marcados_importantes": [],
+                               "seg_clasificacion": 0.0, "seg_decision_jp": 0.0})
+            guardar()
+            print(f"  {idx}/{len(correos)}  AUTO ruido ({motivo_auto})", flush=True)
+            continue
+
         t0 = time.time()
         try:
             pred = clasificar(sistema, c, MOTOR)
@@ -699,6 +797,26 @@ def main():
             pred = {"categoria": "ERROR", "confianza": "baja",
                     "motivo": f"ningún motor respondió ({type(e).__name__})"}
         t_clas = time.time() - t0
+
+        # Segundo atajo: el clasificador lleva 32 aciertos de 32 detectando
+        # ruido, sin un solo error. Cuando las dos pasadas coinciden en RUIDO,
+        # preguntárselo a JP no agrega información — y su tiempo es el recurso
+        # escaso. Exige unanimidad, respeta a los protegidos, y 1 de cada N se
+        # pregunta igual para no dejar de medir si el criterio se degrada.
+        if (pred["categoria"] == "RUIDO" and pred.get("unanime")
+                and not protegido(c) and random.randrange(MUESTREO_CONTROL)):
+            automaticos.append((c, "clasificador unánime"))
+            resultados.append({**{k: c[k] for k in
+                                  ("uid", "de", "para", "cc", "asunto", "fecha", "message_id")},
+                               "cuerpo": c["cuerpo"][:4000],
+                               "prediccion": pred, "correcto": "RUIDO",
+                               "coincide": True, "automatico": "clasificador unánime",
+                               "explicacion_jp": None, "marcados_importantes": [],
+                               "seg_clasificacion": round(t_clas, 2),
+                               "seg_decision_jp": 0.0})
+            guardar()
+            print(f"  {idx}/{len(correos)}  AUTO ruido (unánime)", flush=True)
+            continue
 
         cuerpo = recortar(c["cuerpo"].replace("\r", ""), 600)
         texto = (f"<b>{idx}/{len(correos)}</b>   <i>{html.escape(fecha_legible(c['fecha']))}</i>\n"
@@ -774,7 +892,14 @@ def main():
         f"⏱ Vos tardaste <b>{t_jp_prom:.0f}s</b> por correo\n"
         f"⏱ Total: <b>{(time.time()-t_inicio)/60:.1f} min</b>\n\n"
         f"<b>Donde nos diferimos:</b>\n{detalle}\n\n"
-        f"<i>Cada diferencia es una regla nueva. Nada se movió ni se envió.</i>"))
+        f"<i>Cada diferencia es una regla nueva. Nada se movió ni se envió.</i>"
+        + (f"\n\n🤖 <b>{len(automaticos)} archivados sin preguntarte</b> "
+           f"(ruido ya confirmado por vos):\n"
+           + "\n".join(f"• {html.escape(recortar(x[0]['asunto'], 40))} "
+                       f"<i>{x[1]}</i>" for x in automaticos[:8])
+           + ("\n…" if len(automaticos) > 8 else "")
+           + "\n\n<i>Si alguno no era ruido, decímelo y lo saco de la lista.</i>"
+           if automaticos else "")))
 
     print(f"\n  Coincidencias: {aciertos}/{n}")
     print(f"  Clasificación: {t_clas_prom:.1f}s por correo")
