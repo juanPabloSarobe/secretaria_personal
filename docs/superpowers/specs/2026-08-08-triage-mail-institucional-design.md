@@ -461,7 +461,28 @@ Escritas esas tres correcciones como reglas y reclasificados los mismos casos: *
 
 **Consecuencia metodológica:** el progreso se mide sobre **tandas nuevas**, no reevaluando las viejas. La reevaluación sirve para detectar regresiones, que es un propósito distinto y también necesario. El set acumulado cumple las dos funciones, pero solo la primera medición de cada tanda cuenta como señal de calidad.
 
-### 12.2 Las reglas se pisan entre sí, y antes de lo previsto
+### 12.2 El promedio miente: hay que medir por categoría
+
+Al 2026-08-11, con 61 correos clasificados en nueve tandas, el acierto agregado de primera pasada es 48/61 (79%). Ese número no describe nada útil, porque las categorías no se parecen en dificultad ni en consecuencia:
+
+| Categoría | Acierto | Costo de equivocarse |
+|---|---|---|
+| RUIDO | 32/32 | — |
+| DELEGADO | 10/14 | Bajo: aparece en el briefing algo que no hacía falta |
+| NATALIA | 2/5 | Medio: alguien recibe algo que no le toca |
+| **TUYO** | **4/10** | **Alto e invisible: JP no se entera nunca** |
+
+**El ruido está resuelto y deja de aportar información.** Una tanda con 10 de 14 correos de ruido da 14/14 y no enseña nada. La última tanda fue exactamente eso.
+
+**La categoría más débil es la más cara.** Un correo de JP clasificado como ruido o derivado al equipo no llega a su briefing, y no hay ningún mecanismo que lo detecte después. Los otros errores se corrigen solos en la revisión diaria; este no.
+
+Tendencia dentro de `TUYO`: los primeros seis casos fueron todos errores; los cuatro más recientes, todos aciertos. Mejora, pero con cuatro casos no alcanza para afirmarlo.
+
+**Consecuencias metodológicas:**
+
+1. El umbral de la sección 11.6 —≥90% global y cero falsos negativos en `TUYO`— sigue siendo el correcto, y hoy **no se cumple** ni de lejos en la segunda condición.
+2. Las mediciones se reportan por categoría. Un promedio global se puede subir agregando ruido a la muestra, lo que es exactamente lo contrario de aprender.
+3. El tiempo de JP es el recurso escaso. Gastarlo en confirmar ruido por trigésima vez no enseña nada: conviene que el filtro determinista de remitentes que él propuso absorba esos casos y le deje solo los que discriminan.
 
 La sección 8.1 anticipaba que el archivo de reglas necesitaría poda "a los meses". En la práctica el problema apareció **el primer día**, con quince reglas escritas.
 
