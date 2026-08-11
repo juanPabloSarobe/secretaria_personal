@@ -165,6 +165,29 @@ demás se aprende.
   clasificador lo mandó a Natalia razonando que ella lleva las consultas
   generales)
 
+### Correos que continúan algo que JP arrancó fuera del mail
+
+- Si el cuerpo **hace referencia a un contacto previo**, el correo es **TUYO**,
+  aunque el remitente sea desconocido y aunque el contenido parezca publicidad.
+  Frases que lo delatan:
+
+  > "de acuerdo a lo conversado", "según lo hablado", "como te comenté",
+  > "tal cual charlamos", "conforme a nuestra charla", "te adjunto lo que
+  > te prometí", "siguiendo nuestra conversación telefónica"
+
+  *Por qué:* nadie escribe "de acuerdo a lo conversado" a un desconocido. Esa
+  frase es evidencia de que JP inició el contacto por otra vía —teléfono,
+  WhatsApp, una reunión— y el correo es la continuación.
+
+  *El peligro que evita:* un proveedor nuevo mandando listas de precios se lee
+  exactamente igual que publicidad no solicitada. La diferencia no está en el
+  formato sino en si JP lo pidió, y esa frase es la única huella que queda.
+
+  (aprendida 2026-08-11 — Matías Sanguinetti, dreinet.com, "Contacto": mandó
+  listas de precios de Queclink tras una charla por WhatsApp de ese mismo día.
+  El clasificador lo leyó como publicidad. JP: "parece spam y no tenías forma
+  de saberlo")
+
 ### Conversaciones que ya empezó JP
 
 - **Hay que leer el correo ENTERO, incluido el texto citado abajo.** Las

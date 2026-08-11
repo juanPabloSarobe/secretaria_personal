@@ -322,7 +322,24 @@ Solo interrumpe fuera de los briefings si se cumple alguna de estas tres condici
 
 JP escribe `¿qué hay?` y recibe el estado actual al instante, sin esperar al briefing.
 
-### 10.4 Pedidos por Telegram (evaluado, priorizado)
+### 10.4 Avisar de un correo que se espera
+
+Un caso real expuso un límite que ninguna regla puede salvar. JP cerró una charla por WhatsApp y el proveedor le mandó listas de precios por correo. Para el clasificador, ese mensaje es indistinguible de publicidad no solicitada: remitente desconocido, adjunto comercial, sin hilo previo en la casilla. **La información que lo desambigua no está en el correo: está en una conversación que ocurrió fuera del sistema.**
+
+JP propuso pedirle a sus contactos que incluyeran una palabra clave. La idea funciona pero es frágil: depende de que un tercero se acuerde, y cuando no lo haga el sistema falla en la dirección cara —archiva algo de JP—. Además obliga a explicar el mecanismo a cada contacto nuevo.
+
+**La solución robusta invierte la dirección: que avise JP, no el remitente.** Un mensaje al bot —*"espero un mail de Matías de dreinet sobre precios"*— crea una expectativa con vencimiento. Cuando llega un correo que la satisface, es `TUYO` sin discusión, y la expectativa se consume.
+
+| | |
+|---|---|
+| Depende de | Solo de JP, que ya tiene el bot abierto |
+| Cuándo se usa | Al colgar el teléfono o cerrar el WhatsApp: cinco segundos |
+| Infraestructura | La misma de la Capa 2 — mandarle algo al bot para que lo tenga en cuenta después |
+| Vencimiento | Una expectativa sin cumplir caduca a los pocos días y se avisa |
+
+Mientras tanto, la sección de reglas cubre el caso parcialmente detectando frases que delatan contacto previo ("de acuerdo a lo conversado"), que el propio remitente escribe sin saber que son una señal. Es un paliativo bueno pero incompleto: solo funciona si el remitente redacta así.
+
+### 10.5 Pedidos por Telegram (evaluado, priorizado)
 
 JP planteó poder pedirle cosas a la secretaria en vez de solo responderle. Son dos capacidades con perfiles de riesgo muy distintos, y conviene no tratarlas como una sola.
 
