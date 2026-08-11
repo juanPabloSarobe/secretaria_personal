@@ -48,8 +48,28 @@ def tg(metodo, **params):
         {k: (json.dumps(v) if isinstance(v, (dict, list)) else v)
          for k, v in params.items()}).encode()
     req = urllib.request.Request(url, data=data, headers=UA)
-    with urllib.request.urlopen(req, timeout=70) as r:
-        return json.load(r)
+    try:
+        with urllib.request.urlopen(req, timeout=70) as r:
+            return json.load(r)
+    except urllib.error.HTTPError as e:
+        # el cuerpo dice qué pasó; sin esto solo se ve "HTTP Error 400"
+        detalle = e.read().decode(errors="replace")[:200]
+        raise RuntimeError(f"Telegram {metodo} -> {e.code}: {detalle}") from None
+
+
+def tg_suave(metodo, **params):
+    """Llamada cosmética: si falla, se sigue igual.
+
+    answerCallbackQuery solo apaga el relojito del botón, y Telegram lo rechaza
+    con 400 si la consulta ya expiró — cosa que pasa cuando JP se toma su tiempo
+    para contestar. Que no se pueda apagar un reloj no puede costar una sesión
+    entera de trabajo manual.
+    """
+    try:
+        return tg(metodo, **params)
+    except Exception as e:
+        print(f"      (aviso: {e})", flush=True)
+        return None
 
 
 def teclado(idx):
@@ -89,22 +109,22 @@ def esperar_respuesta(idx, offset, msg_id, texto, direcciones):
                 continue
             partes = cq["data"].split("|")
             if len(partes) != 3 or partes[1] != str(idx):
-                tg("answerCallbackQuery", callback_query_id=cq["id"],
+                tg_suave("answerCallbackQuery", callback_query_id=cq["id"],
                    text="Ese botón es de otro correo, ya pasó.")
                 continue
             accion, valor = partes[0], partes[2]
 
             if accion == "c":                                   # categoría: termina
-                tg("answerCallbackQuery", callback_query_id=cq["id"])
+                tg_suave("answerCallbackQuery", callback_query_id=cq["id"])
                 return valor, offset, marcados
 
             if accion == "i":                                   # abrir submenú
-                tg("answerCallbackQuery", callback_query_id=cq["id"])
+                tg_suave("answerCallbackQuery", callback_query_id=cq["id"])
                 if not direcciones:
-                    tg("answerCallbackQuery", callback_query_id=cq["id"],
+                    tg_suave("answerCallbackQuery", callback_query_id=cq["id"],
                        text="Este correo no tiene direcciones externas.")
                     continue
-                tg("editMessageText", chat_id=os.environ["TELEGRAM_CHAT_ID"],
+                tg_suave("editMessageText", chat_id=os.environ["TELEGRAM_CHAT_ID"],
                    message_id=msg_id, parse_mode="HTML",
                    text=texto.replace("¿Qué correspondía?",
                                       "¿Cuál de estos es el cliente importante?"),
@@ -113,10 +133,10 @@ def esperar_respuesta(idx, offset, msg_id, texto, direcciones):
             elif accion == "d":                                 # elegir dirección
                 etiqueta, direccion = direcciones[int(valor)]
                 nuevo = marcar_importante(etiqueta, direccion)
-                tg("answerCallbackQuery", callback_query_id=cq["id"],
+                tg_suave("answerCallbackQuery", callback_query_id=cq["id"],
                    text=("⭐ Guardado: " + direccion) if nuevo else "Ya estaba en la lista")
                 marcados.append(direccion)
-                tg("editMessageText", chat_id=os.environ["TELEGRAM_CHAT_ID"],
+                tg_suave("editMessageText", chat_id=os.environ["TELEGRAM_CHAT_ID"],
                    message_id=msg_id, parse_mode="HTML",
                    text=texto.replace("¿Qué correspondía?",
                                       f"⭐ {html.escape(direccion)} marcado como importante.\n\n"
@@ -124,8 +144,8 @@ def esperar_respuesta(idx, offset, msg_id, texto, direcciones):
                    reply_markup=teclado(idx))
 
             elif accion == "v":                                 # volver sin marcar
-                tg("answerCallbackQuery", callback_query_id=cq["id"])
-                tg("editMessageText", chat_id=os.environ["TELEGRAM_CHAT_ID"],
+                tg_suave("answerCallbackQuery", callback_query_id=cq["id"])
+                tg_suave("editMessageText", chat_id=os.environ["TELEGRAM_CHAT_ID"],
                    message_id=msg_id, parse_mode="HTML", text=texto,
                    reply_markup=teclado(idx))
 
@@ -180,7 +200,7 @@ def pedir_explicacion(idx, offset, esperado, dicho):
             offset = u["update_id"] + 1
             cq = u.get("callback_query")
             if cq:
-                tg("answerCallbackQuery", callback_query_id=cq["id"])
+                tg_suave("answerCallbackQuery", callback_query_id=cq["id"])
                 if cq["data"].startswith(f"x|{idx}|"):
                     return None, offset
                 continue
@@ -558,7 +578,7 @@ def main():
         coincide = eleccion == pred["categoria"]
         veredicto = ("✅ <b>Coincidimos</b>" if coincide else
                      f"📚 <b>Aprendido</b> — yo dije <b>{pred['categoria']}</b>")
-        tg("editMessageText", chat_id=chat, message_id=msg_id, parse_mode="HTML",
+        tg_suave("editMessageText", chat_id=chat, message_id=msg_id, parse_mode="HTML",
            text=texto.replace("¿Qué correspondía?",
                               f"Vos: <b>{eleccion}</b>\n{veredicto}\n"
                               f"<i>Mi motivo: {html.escape(pred.get('motivo',''))} "
