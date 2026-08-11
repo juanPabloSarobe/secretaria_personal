@@ -484,6 +484,8 @@ Tendencia dentro de `TUYO`: los primeros seis casos fueron todos errores; los cu
 2. Las mediciones se reportan por categoría. Un promedio global se puede subir agregando ruido a la muestra, lo que es exactamente lo contrario de aprender.
 3. El tiempo de JP es el recurso escaso. Gastarlo en confirmar ruido por trigésima vez no enseña nada: conviene que el filtro determinista de remitentes que él propuso absorba esos casos y le deje solo los que discriminan.
 
+### 12.3 Las reglas se pisan entre sí, y antes de lo previsto
+
 La sección 8.1 anticipaba que el archivo de reglas necesitaría poda "a los meses". En la práctica el problema apareció **el primer día**, con quince reglas escritas.
 
 Secuencia observada el 2026-08-08, cada paso verificado con el revisor de regresiones:

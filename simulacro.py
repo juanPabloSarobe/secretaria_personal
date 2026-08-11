@@ -563,6 +563,7 @@ def clasificar_una_vez(sistema, correo, preferido=None):
             "messages": [
                 {"role": "system", "content": sistema},
                 {"role": "user", "content":
+                 f"Fecha: {correo.get('fecha') or '(desconocida)'}\n"
                  f"De: {correo['de']}\nPara: {correo['para']}\nCC: {correo['cc'] or '(nadie)'}\n"
                  f"Asunto: {correo['asunto']}\n\n{correo['cuerpo'][:3000]}"},
             ],
@@ -592,6 +593,39 @@ def clasificar_una_vez(sistema, correo, preferido=None):
 # ------------------------------------------------------------------ Principal
 def recortar(s, n):
     return s if len(s) <= n else s[:n].rstrip() + "…"
+
+
+DIAS = ["lun", "mar", "mié", "jue", "vie", "sáb", "dom"]
+MESES = ["ene", "feb", "mar", "abr", "may", "jun",
+         "jul", "ago", "sep", "oct", "nov", "dic"]
+
+
+def fecha_legible(cabecera):
+    """Fecha del correo en criollo, con la antigüedad al lado.
+
+    Sin esto no se distingue un correo de hoy de uno de la semana pasada, ni
+    un reenvío de un pedido nuevo: JP se topó con un correo del jueves anterior
+    sin ninguna forma de saberlo.
+    """
+    try:
+        d = email.utils.parsedate_to_datetime(cabecera)
+    except Exception:
+        return cabecera[:30] if cabecera else "(sin fecha)"
+    if d.tzinfo is None:
+        d = d.replace(tzinfo=timezone.utc)
+
+    dias = (datetime.now(timezone.utc) - d).days
+    if dias <= 0:
+        antiguedad = "hoy"
+    elif dias == 1:
+        antiguedad = "ayer"
+    elif dias < 7:
+        antiguedad = f"hace {dias} días"
+    else:
+        antiguedad = f"hace {dias // 7} semana{'s' if dias >= 14 else ''}"
+
+    return (f"{DIAS[d.weekday()]} {d.day} {MESES[d.month - 1]} "
+            f"{d.strftime('%H:%M')} · {antiguedad}")
 
 
 def main():
@@ -667,7 +701,7 @@ def main():
         t_clas = time.time() - t0
 
         cuerpo = recortar(c["cuerpo"].replace("\r", ""), 600)
-        texto = (f"<b>{idx}/{len(correos)}</b>\n"
+        texto = (f"<b>{idx}/{len(correos)}</b>   <i>{html.escape(fecha_legible(c['fecha']))}</i>\n"
                  f"<b>De:</b> {html.escape(recortar(c['de'], 90))}\n"
                  f"<b>Para:</b> {html.escape(recortar(c['para'], 90))}\n"
                  f"<b>CC:</b> {html.escape(recortar(c['cc'] or '(nadie)', 90))}\n"
