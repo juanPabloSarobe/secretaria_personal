@@ -490,14 +490,16 @@ def main():
     print("Motores, en orden de uso: "
           + " → ".join(f"{n} ({m})" for n, _, _, m in cadena))
 
-    print(f"Trayendo los últimos {CANTIDAD} correos (sin marcarlos como leídos)…")
-    traidos = traer_correos(CANTIDAD)
-
-    # No volver a preguntar por lo ya respondido. "Los últimos 20" incluye a
-    # "los últimos 10", así que sin esto cada tanda repite la anterior entera.
+    # CANTIDAD son correos NUEVOS para revisar, no correos a traer. Como ya hay
+    # tandas respondidas, hay que traer de más para llegar a esa cantidad.
     ya = ids_respondidos()
-    correos = [c for c in traidos if identidad(c) not in ya]
-    repetidos = len(traidos) - len(correos)
+    pozo = min(CANTIDAD + len(ya) + 10, 400)
+    print(f"Trayendo hasta {pozo} correos (sin marcarlos como leídos), "
+          f"para juntar {CANTIDAD} sin revisar…")
+    traidos = traer_correos(pozo)
+
+    correos = [c for c in traidos if identidad(c) not in ya][:CANTIDAD]
+    repetidos = len(traidos) - len([c for c in traidos if identidad(c) not in ya])
     print(f"  {len(traidos)} leídos, {repetidos} ya respondidos antes, "
           f"{len(correos)} para revisar.\n")
     if not correos:
