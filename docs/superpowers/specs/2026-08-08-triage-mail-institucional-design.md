@@ -113,7 +113,7 @@ Para cada correo, el clasificador responde tres preguntas **en este orden**:
 
 | Categoría | Acción | ¿Interrumpe a JP? |
 |---|---|---|
-| **Ruido** — newsletters, notificaciones automáticas, spam | Mueve a la carpeta `INBOX.Ruido` (ver 6.3) | No. Solo un conteo en el briefing |
+| **Ruido** — newsletters, notificaciones automáticas, spam | Mueve a la carpeta `INBOX.Ruido` (ver 6.4) | No. Solo un conteo en el briefing |
 | **Delegado** — tema de Enzo o Natalia, ya están en copia | Ninguna. Abre hilo de seguimiento | No. Solo si vence el plazo sin señal |
 | **A derivar** — tema de Enzo o Natalia, no están en copia | Responde al hilo con copia a todos, agregando al responsable. Abre seguimiento | Aparece en el briefing como hecho consumado |
 | **Tuyo** — escalación, reunión, pedido personal | Ninguna acción automática | Sí: va al briefing como acción de JP |
@@ -133,7 +133,25 @@ O sea: `DELEGADO` y `TUYO` eran **ambas verdaderas**. No es que el clasificador 
 
 Los botones del simulacro siguen siendo excluyentes por ahora, lo que subestima estos casos. Corregirlo es trabajo pendiente para la primera versión del sistema real.
 
-### 6.3 Convención de carpetas del servidor
+### 6.3 La inestabilidad es la señal de duda (propuesta)
+
+El clasificador devuelve un campo `confianza`, y ese campo **no sirve**. En los tres correos de SiPago dijo `confianza: alta` mientras se equivocaba, y volvió a decir `alta` al mandar un CV masivo a Natalia. Un modelo no sabe cuándo no sabe; preguntarle es preguntarle a la parte equivocada.
+
+Pero hay una señal que sí funciona, y salió de los datos: **cuando un caso es genuinamente ambiguo, el clasificador responde distinto en pasadas distintas**, aun con temperatura cero. Al 2026-08-11, cuatro de cuarenta y seis casos oscilaban así — y son justamente los casos donde dos reglas del archivo compiten.
+
+**Propuesta:** clasificar cada correo **dos veces**. Si ambas pasadas coinciden, actuar. Si difieren, correr una tercera; si sigue sin haber mayoría clara, la categoría es `DUDA` y se le pregunta a JP.
+
+| | |
+|---|---|
+| Costo | 2 a 3 veces los tokens. Con 10-20 correos diarios: 30.000 a 90.000 tokens, dentro de los 100.000 diarios de Groq |
+| Beneficio | La duda se detecta sola, sin depender de que el modelo la declare |
+| Efecto colateral | Cada caso dudoso genera una pregunta, y cada respuesta de JP genera una regla. La ambigüedad se convierte en aprendizaje en vez de en un error silencioso |
+
+Esto encaja con la sección 8: el sistema ya pregunta cuando no tiene regla. Esto agrega preguntar cuando tiene **dos reglas que se contradicen**, que hasta ahora resolvía tirando una moneda.
+
+**Pendiente de decisión de JP** por el costo en tokens.
+
+### 6.4 Convención de carpetas del servidor
 
 Verificado contra el servidor real (`vps-1862452-x.dattaweb.com`, 2026-08-08): las carpetas usan **prefijo `INBOX.` con punto como separador** — `INBOX.Sent`, `INBOX.Trash`, `INBOX.Drafts`, `INBOX.spam`, `INBOX.Promociones`.
 

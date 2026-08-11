@@ -152,6 +152,19 @@ demás se aprende.
   mantenimiento programado. El clasificador lo derivó a Enzo por el vocabulario
   técnico, JP lo marcó como ruido)
 
+### Currículums y envíos masivos
+
+- Un **CV espontáneo**, sin búsqueda abierta de por medio, es **RUIDO**. No es
+  de Natalia aunque ella coordine al equipo: nadie tiene que hacer nada con él.
+
+- **`undisclosed-recipients` en el campo Para es señal fuerte de envío masivo.**
+  Quien manda algo a una lista oculta no le está escribiendo a Full Control GPS
+  en particular. Salvo que el contenido pida una acción concreta, es RUIDO.
+
+  (aprendida 2026-08-11 — "CV - FANELLO FERNANDO" a undisclosed-recipients; el
+  clasificador lo mandó a Natalia razonando que ella lleva las consultas
+  generales)
+
 ### Conversaciones que ya empezó JP
 
 - **Hay que leer el correo ENTERO, incluido el texto citado abajo.** Las
