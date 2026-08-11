@@ -42,19 +42,48 @@ CATEGORIAS = {
 
 
 # ------------------------------------------------------------------ Telegram
-def tg(metodo, **params):
+def tg(metodo, _intentos=5, **params):
+    """Llamada a Telegram, tolerante a tropiezos de red.
+
+    Esperar a que JP conteste significa mantener conexiones abiertas durante
+    horas: una tanda quedó 84 minutos esperando el primer botón. En ese lapso
+    un corte momentáneo es inevitable, y sin reintento mata la sesión entera
+    junto con todo lo que se hubiera avanzado.
+
+    Un long-poll que vence es lo normal, no un error: se vuelve a pedir.
+    """
     url = f"https://api.telegram.org/bot{os.environ['TELEGRAM_BOT_TOKEN']}/{metodo}"
     data = urllib.parse.urlencode(
         {k: (json.dumps(v) if isinstance(v, (dict, list)) else v)
          for k, v in params.items()}).encode()
-    req = urllib.request.Request(url, data=data, headers=UA)
-    try:
-        with urllib.request.urlopen(req, timeout=70) as r:
-            return json.load(r)
-    except urllib.error.HTTPError as e:
-        # el cuerpo dice qué pasó; sin esto solo se ve "HTTP Error 400"
-        detalle = e.read().decode(errors="replace")[:200]
-        raise RuntimeError(f"Telegram {metodo} -> {e.code}: {detalle}") from None
+
+    for intento in range(_intentos):
+        req = urllib.request.Request(url, data=data, headers=UA)
+        try:
+            with urllib.request.urlopen(req, timeout=70) as r:
+                return json.load(r)
+
+        except urllib.error.HTTPError as e:
+            detalle = e.read().decode(errors="replace")[:200]
+            if e.code < 500 and e.code != 429:
+                # un 4xx no se arregla repitiéndolo; el cuerpo dice qué pasó
+                raise RuntimeError(f"Telegram {metodo} -> {e.code}: {detalle}") from None
+            if intento == _intentos - 1:
+                raise RuntimeError(f"Telegram {metodo} -> {e.code}: {detalle}") from None
+            print(f"      (Telegram {e.code}, reintento {intento + 1})", flush=True)
+            time.sleep(min(2 ** intento, 15))
+
+        except (TimeoutError, urllib.error.URLError, OSError,
+                json.JSONDecodeError) as e:
+            if intento == _intentos - 1:
+                raise RuntimeError(
+                    f"Telegram {metodo}: red caída tras {_intentos} intentos "
+                    f"({type(e).__name__}: {e})") from None
+            # el long-poll que vence es rutina; no vale la pena llenar el log
+            if metodo != "getUpdates":
+                print(f"      (red: {type(e).__name__}, reintento {intento + 1})",
+                      flush=True)
+            time.sleep(min(2 ** intento, 15))
 
 
 def tg_suave(metodo, **params):
