@@ -8,6 +8,7 @@ Se ocupa de:
 - Análisis y borrado de infracciones
 - Análisis de funcionamiento y de datos de equipos GPS
 - Geocercas de velocidad
+- **Configuración de usuarios y de conductores** en la plataforma
 - Todo lo referido a programación de equipos
 
 ## Natalia — Directora administrativa
