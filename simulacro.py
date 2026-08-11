@@ -12,6 +12,7 @@ Lo único que sale hacia afuera son mensajes de Telegram para vos.
 Uso:  python3 simulacro.py [cantidad] [--motor groq|nvidia|ollama]
 """
 import email, email.policy, email.utils, glob, hashlib, html, imaplib, json, os, re, sys, time
+from collections import Counter
 import urllib.error, urllib.parse, urllib.request
 from datetime import datetime, timezone
 
@@ -520,7 +521,41 @@ def _pedir(base, key, cuerpo, intentos=4):
             time.sleep(espera + 0.5)
 
 
-def clasificar(sistema, correo, preferido=None):
+def clasificar(sistema, correo, preferido=None, pasadas=3):
+    """Clasifica con doble pasada y desempate.
+
+    Dos pasadas que coinciden alcanzan. Si difieren, una tercera decide por
+    mayoría. Si las tres difieren, la categoría es DUDA y se pregunta.
+
+    El motivo es que el campo `confianza` que devuelve el modelo no sirve como
+    señal de duda: dijo "alta" mientras se equivocaba en los tres correos de
+    SiPago. La discrepancia entre pasadas sí sirve — marca los casos donde dos
+    reglas del archivo compiten. Medido sobre 46 casos: 11 oscilan, y en todos
+    la mayoría acierta. Una sola pasada se los juega a cara o cruz.
+    """
+    votos = []
+    for n in range(pasadas):
+        votos.append(clasificar_una_vez(sistema, correo, preferido))
+        # dos iguales seguidas bastan: no se paga una tercera al pedo
+        if n == 1 and votos[0]["categoria"] == votos[1]["categoria"]:
+            return {**votos[0], "pasadas": 2, "unanime": True}
+
+    conteo = Counter(v["categoria"] for v in votos)
+    categoria, apoyos = conteo.most_common(1)[0]
+    emitidas = [v["categoria"] for v in votos]
+
+    if apoyos == 1:                     # ninguna se repitió: ambigüedad real
+        return {"categoria": "DUDA",
+                "motivo": "sin acuerdo entre pasadas: " + " / ".join(emitidas),
+                "confianza": "baja", "pasadas": len(votos), "unanime": False,
+                "emitidas": emitidas}
+
+    ganador = next(v for v in votos if v["categoria"] == categoria)
+    return {**ganador, "pasadas": len(votos), "unanime": False,
+            "emitidas": emitidas}
+
+
+def clasificar_una_vez(sistema, correo, preferido=None):
     disponibles = motores(preferido)
     for n, (nombre, base, key, modelo) in enumerate(disponibles):
         cuerpo = json.dumps({
@@ -597,6 +632,9 @@ def main():
         "que te avise fuera de horario.\n\n"
         "🤔 Cuando diferimos te voy a preguntar <b>por qué</b>. Podés contestar "
         "escribiendo o mandando un audio.\n\n"
+        "Ahora clasifico cada correo <b>dos veces</b>, y si no me pongo de acuerdo "
+        "conmigo mismo, una tercera. Si aun así hay empate, te lo digo en vez de "
+        "elegir al azar.\n\n"
         "No muevo ni mando nada: esto es solo lectura."))
 
     offset, resultados, t_inicio = 0, [], time.time()
@@ -637,8 +675,16 @@ def main():
         t_espera = time.time() - t_espera
 
         coincide = eleccion == pred["categoria"]
-        veredicto = ("✅ <b>Coincidimos</b>" if coincide else
-                     f"📚 <b>Aprendido</b> — yo dije <b>{pred['categoria']}</b>")
+        if pred.get("emitidas"):
+            # hubo desacuerdo entre pasadas: vale la pena que JP lo sepa, es la
+            # diferencia entre "me equivoqué" y "este caso es genuinamente ambiguo"
+            desacuerdo = (f"\n<i>Me clasifiqué distinto en cada pasada: "
+                          f"{' / '.join(pred['emitidas'])}</i>")
+        else:
+            desacuerdo = ""
+        veredicto = (("✅ <b>Coincidimos</b>" if coincide else
+                      f"📚 <b>Aprendido</b> — yo dije <b>{pred['categoria']}</b>")
+                     + desacuerdo)
         tg_suave("editMessageText", chat_id=chat, message_id=msg_id, parse_mode="HTML",
            text=texto.replace("¿Qué correspondía?",
                               f"Vos: <b>{eleccion}</b>\n{veredicto}\n"

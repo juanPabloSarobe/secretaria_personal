@@ -21,7 +21,7 @@ from collections import Counter
 import os.path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from simulacro import clasificar, motores, prompt_sistema  # noqa: E402
+from simulacro import clasificar_una_vez, motores, prompt_sistema  # noqa: E402
 
 _args = sys.argv[1:]
 MOTOR = None
@@ -51,7 +51,7 @@ for i, c in enumerate(d["casos"], 1):
     votos = Counter()
     for _ in range(PASADAS):
         try:
-            votos[clasificar(sistema, correo, MOTOR)["categoria"]] += 1
+            votos[clasificar_una_vez(sistema, correo, MOTOR)["categoria"]] += 1
         except Exception as e:                  # un fallo aislado no tira la corrida
             print(f"{i:<3} error en una pasada: {type(e).__name__}")
     if not votos:
