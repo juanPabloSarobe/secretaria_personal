@@ -152,6 +152,37 @@ demás se aprende.
   mantenimiento programado. El clasificador lo derivó a Enzo por el vocabulario
   técnico, JP lo marcó como ruido)
 
+### Conversaciones que ya empezó JP
+
+- **Hay que leer el correo ENTERO, incluido el texto citado abajo.** Las
+  respuestas arrastran el hilo anterior, y ahí está la prueba de quién venía
+  hablando. Un `De: Lic.Sarobe Juan Pablo` en la parte citada significa que JP
+  escribió el mensaje anterior.
+
+- **Si JP escribió el mensaje anterior del hilo, la respuesta es TUYO.** No se
+  deriva a nadie, aunque el tema sea de Enzo o de Natalia y aunque ellos figuren
+  en copia. JP está llevando esa conversación: meter a otra persona en el medio
+  le anuncia al cliente que cambió de interlocutor.
+
+  *Cómo reconocerlo sin la carpeta de enviados:* buscar en el cuerpo citado una
+  línea `De:` seguida del nombre o la casilla de JP.
+
+  (aprendida 2026-08-11 — Enrique Rodríguez, "RE: Pedido de Cotización". JP:
+  "le pregunté yo y me respondió a mí. Tener que leer absolutamente todo el
+  mail, el cuerpo también, no solamente lo nuevo")
+
+### Integraciones con plataformas de terceros
+
+- **Todo lo referido a integrar la plataforma con sistemas de otras empresas es
+  TUYO**, sin importar quién esté en copia. No es tema de Enzo aunque suene
+  técnico, ni de Natalia aunque haya coordinación de por medio.
+
+- **IMSEG** (`imseg.com`) es de JP siempre, por la misma razón.
+
+  (aprendida 2026-08-11 — IMSEG, "Situación conductores OPS WM / PLUSPETROL":
+  el clasificador vio a Natalia en copia y dijo DELEGADO. JP: "todo lo de
+  integraciones con plataforma de terceros es mío. Todos los de IMSEG es mío")
+
 ### Quién está en el hilo
 
 - **El responsable puede estar en el campo De, no solo en Para o CC.** Si el

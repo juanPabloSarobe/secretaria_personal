@@ -30,8 +30,20 @@ Se ocupa de:
 - Problemas graves y conflictos con clientes
 - Disconformidades
 - Desarrollos nuevos
+- **Integraciones con plataformas de terceros** — todo lo referido a integrar
+  la plataforma de Full Control GPS con sistemas de otras empresas
 - Clientes importantes que piden hablar con él
 - Todo lo que el resto del equipo no entienda, no pueda resolver, o le pida ayuda
+
+## Interlocutores que son de JP
+
+Correspondencia de estos remitentes es de JP por quiénes son, sin importar el
+tema ni quién más esté en copia.
+
+- IMSEG (`imseg.com`) — integraciones
+  <!-- marcado 2026-08-11, explicado por JP -->
+
+
 
 **Regla estructural:** Enzo y Natalia se definen por *tema*. JP se define por
 *severidad*. Una consulta de facturación es de Natalia; una disconformidad grave

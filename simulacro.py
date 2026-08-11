@@ -387,7 +387,7 @@ def traer_correos(n):
             "asunto": str(msg.get("Subject", "(sin asunto)"))[:200],
             "fecha": str(msg.get("Date", "")),
             "message_id": str(msg.get("Message-ID", "")),
-            "cuerpo": texto_plano(msg)[:1500],
+            "cuerpo": texto_plano(msg)[:4000],
         })
     M.logout()
     return correos
@@ -529,7 +529,7 @@ def clasificar(sistema, correo, preferido=None):
                 {"role": "system", "content": sistema},
                 {"role": "user", "content":
                  f"De: {correo['de']}\nPara: {correo['para']}\nCC: {correo['cc'] or '(nadie)'}\n"
-                 f"Asunto: {correo['asunto']}\n\n{correo['cuerpo'][:1200]}"},
+                 f"Asunto: {correo['asunto']}\n\n{correo['cuerpo'][:3000]}"},
             ],
             # 3000 y no 500: los modelos de razonamiento gastan tokens pensando
             # antes de escribir, y con un presupuesto corto se cortan justo antes
@@ -652,7 +652,7 @@ def main():
 
         resultados.append({**{k: c[k] for k in
                               ("uid", "de", "para", "cc", "asunto", "fecha", "message_id")},
-                           "cuerpo": c["cuerpo"][:1500],
+                           "cuerpo": c["cuerpo"][:4000],
                            "prediccion": pred, "correcto": eleccion,
                            "coincide": coincide,
                            "explicacion_jp": explicacion,
