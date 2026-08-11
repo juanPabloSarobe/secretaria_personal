@@ -133,7 +133,7 @@ O sea: `DELEGADO` y `TUYO` eran **ambas verdaderas**. No es que el clasificador 
 
 Los botones del simulacro siguen siendo excluyentes por ahora, lo que subestima estos casos. Corregirlo es trabajo pendiente para la primera versión del sistema real.
 
-### 6.3 La inestabilidad es la señal de duda (propuesta)
+### 6.3 La inestabilidad es la señal de duda (medido)
 
 El clasificador devuelve un campo `confianza`, y ese campo **no sirve**. En los tres correos de SiPago dijo `confianza: alta` mientras se equivocaba, y volvió a decir `alta` al mandar un CV masivo a Natalia. Un modelo no sabe cuándo no sabe; preguntarle es preguntarle a la parte equivocada.
 
@@ -148,6 +148,17 @@ Pero hay una señal que sí funciona, y salió de los datos: **cuando un caso es
 | Efecto colateral | Cada caso dudoso genera una pregunta, y cada respuesta de JP genera una regla. La ambigüedad se convierte en aprendizaje en vez de en un error silencioso |
 
 Esto encaja con la sección 8: el sistema ya pregunta cuando no tiene regla. Esto agrega preguntar cuando tiene **dos reglas que se contradicen**, que hasta ahora resolvía tirando una moneda.
+
+**Esto no es una conjetura: ya está medido, por accidente.** `revisar_reglas.py` corre cada caso varias veces y se queda con la mayoría — o sea que hace exactamente lo que esta sección propone. Con las mismas reglas y los mismos correos:
+
+| Cómo se corre | Resultado |
+|---|---|
+| Mayoría de 3 pasadas (el revisor) | **46 de 46** |
+| Una sola pasada (el simulacro en vivo) | 10 de 12 en la tanda más reciente |
+
+Y **11 de los 46 casos oscilan entre pasadas** — casi uno de cada cuatro. En todos ellos la mayoría acierta, lo que explica el 46/46. Una sola pasada se juega esos once a cara o cruz.
+
+La diferencia entre las dos filas de esa tabla es el valor de esta sección, medido sobre datos reales y no estimado.
 
 **Pendiente de decisión de JP** por el costo en tokens.
 
