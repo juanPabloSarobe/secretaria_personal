@@ -152,12 +152,21 @@ def esperar_respuesta(idx, offset, msg_id, texto, direcciones):
 
 # ------------------------------------------------------------------ Explicaciones
 def transcribir(file_id):
-    """Baja un audio de Telegram y lo transcribe con Whisper en Groq."""
+    """Baja un audio de Telegram y lo transcribe con Whisper en Groq.
+
+    Cada paso se anuncia y tiene su propio tope de tiempo: una vez esto se
+    colgó en silencio durante minutos y desde afuera no había forma de saber
+    si estaba bajando, transcribiendo o muerto.
+    """
+    print("      [audio] pidiendo la ubicación del archivo…", flush=True)
     d = tg("getFile", file_id=file_id)
     ruta = d["result"]["file_path"]
+
+    print("      [audio] descargando…", flush=True)
     url = f"https://api.telegram.org/file/bot{os.environ['TELEGRAM_BOT_TOKEN']}/{ruta}"
-    with urllib.request.urlopen(urllib.request.Request(url, headers=UA), timeout=60) as r:
+    with urllib.request.urlopen(urllib.request.Request(url, headers=UA), timeout=30) as r:
         audio = r.read()
+    print(f"      [audio] {len(audio)} bytes, transcribiendo…", flush=True)
 
     # multipart armado a mano: urllib no trae ayuda para esto
     borde = "----secretaria" + str(len(audio))
@@ -175,8 +184,10 @@ def transcribir(file_id):
         os.environ["GROQ_BASE_URL"] + "/audio/transcriptions", data=b"".join(partes),
         headers={**UA, "Authorization": "Bearer " + os.environ["GROQ_API_KEY"],
                  "Content-Type": f"multipart/form-data; boundary={borde}"})
-    with urllib.request.urlopen(req, timeout=90) as r:
-        return json.load(r).get("text", "").strip()
+    with urllib.request.urlopen(req, timeout=60) as r:
+        texto = json.load(r).get("text", "").strip()
+    print(f"      [audio] listo: {texto[:60]!r}", flush=True)
+    return texto
 
 
 def pedir_explicacion(idx, offset, esperado, dicho):
@@ -193,7 +204,18 @@ def pedir_explicacion(idx, offset, esperado, dicho):
         reply_markup={"inline_keyboard": [[
             {"text": "⏭ Saltear", "callback_data": f"x|{idx}|0"}]]})
 
+    # Tope duro: sin esto, un fallo de red mientras se procesa un audio deja la
+    # tanda esperando para siempre y a JP mirando el teléfono sin saberlo.
+    limite = time.time() + ESPERA_MAXIMA_EXPLICACION
+
     while True:
+        if time.time() > limite:
+            tg_suave("sendMessage", chat_id=os.environ["TELEGRAM_CHAT_ID"],
+                     text="Sigo sin recibir tu explicación, así que continúo. "
+                          "Tu decisión quedó registrada igual.")
+            print("      (sin explicación tras el tiempo de espera; sigo)", flush=True)
+            return None, offset
+
         d = tg("getUpdates", offset=offset, timeout=60,
                allowed_updates=["message", "callback_query"])
         for u in d.get("result", []):
@@ -209,15 +231,21 @@ def pedir_explicacion(idx, offset, esperado, dicho):
                 return m["text"].strip(), offset
             if m.get("voice") or m.get("audio"):
                 nota = m.get("voice") or m.get("audio")
+                # acusar recibo ANTES de trabajar: si la transcripción tarda o
+                # falla, JP igual sabe que su audio llegó
+                tg_suave("sendMessage", chat_id=os.environ["TELEGRAM_CHAT_ID"],
+                         text="🎙 Recibí tu audio, lo estoy transcribiendo…")
                 try:
                     texto = transcribir(nota["file_id"])
                 except Exception as e:
-                    tg("sendMessage", chat_id=os.environ["TELEGRAM_CHAT_ID"],
-                       text=f"No pude transcribir el audio ({type(e).__name__}). "
-                            "¿Me lo escribís?")
+                    print(f"      [audio] falló: {type(e).__name__}: {e}", flush=True)
+                    tg_suave("sendMessage", chat_id=os.environ["TELEGRAM_CHAT_ID"],
+                             text=f"No pude transcribir el audio ({type(e).__name__}). "
+                                  "¿Me lo escribís?")
                     continue
-                tg("sendMessage", chat_id=os.environ["TELEGRAM_CHAT_ID"],
-                   parse_mode="HTML", text=f"🎙 Te entendí: <i>{html.escape(texto)}</i>")
+                tg_suave("sendMessage", chat_id=os.environ["TELEGRAM_CHAT_ID"],
+                         parse_mode="HTML",
+                         text=f"🎙 Te entendí: <i>{html.escape(texto)}</i>")
                 return texto, offset
 
 
@@ -389,6 +417,10 @@ Respondé SOLO un objeto JSON, sin texto alrededor:
 # Más allá de esto no es un límite pasajero sino cuota agotada: no tiene sentido
 # dormir, conviene cambiar de motor. Groq llegó a mandar Retry-After de 1462s.
 ESPERA_MAXIMA = 90
+
+# Tope para que JP explique un caso. Pasado esto se sigue sin explicación:
+# el trabajo ya hecho vale más que una explicación que quizá nunca llegue.
+ESPERA_MAXIMA_EXPLICACION = 900
 
 # Catálogo de motores. El .env guarda las credenciales de TODOS a la vez;
 # elegir cuál se usa es una decisión del código, no un archivo que haya que
