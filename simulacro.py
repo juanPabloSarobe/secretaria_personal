@@ -458,7 +458,7 @@ ESPERA_MAXIMA_EXPLICACION = 900
 MOTORES = {
     "groq":   ("GROQ_BASE_URL",   "GROQ_API_KEY",   "llama-3.3-70b-versatile"),
     "nvidia": ("NVIDIA_BASE_URL", "NVIDIA_API_KEY", "nvidia/nemotron-3-super-120b-a12b"),
-    "ollama": ("OLLAMA_BASE_URL", "OLLAMA_API_KEY", "qwen3:30b-a3b"),
+    "ollama": ("OLLAMA_BASE_URL", "OLLAMA_API_KEY", "qwen2.5:14b"),
 }
 
 # Orden de uso: el primero es el principal y los siguientes son respaldo
@@ -655,7 +655,15 @@ def main():
 
     for idx, c in enumerate(correos, 1):
         t0 = time.time()
-        pred = clasificar(sistema, c, MOTOR)
+        try:
+            pred = clasificar(sistema, c, MOTOR)
+        except Exception as e:
+            # Que se caigan TODOS los motores no puede costar la tanda. Lo
+            # valioso de cada correo es el criterio de JP, no mi opinión: se lo
+            # muestro igual y su respuesta queda registrada como siempre.
+            print(f"      (sin clasificar: {e})", flush=True)
+            pred = {"categoria": "ERROR", "confianza": "baja",
+                    "motivo": f"ningún motor respondió ({type(e).__name__})"}
         t_clas = time.time() - t0
 
         cuerpo = recortar(c["cuerpo"].replace("\r", ""), 600)
@@ -692,7 +700,9 @@ def main():
                               f"(confianza {pred.get('confianza','?')})</i>"))
 
         explicacion = None
-        if not coincide:
+        # si ningún motor respondió no hay nada que explicar: no me equivoqué
+        # de criterio, directamente no opiné
+        if not coincide and pred["categoria"] != "ERROR":
             explicacion, offset = pedir_explicacion(
                 idx, offset, eleccion, pred["categoria"])
 
