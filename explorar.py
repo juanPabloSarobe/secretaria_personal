@@ -32,6 +32,11 @@ if "--motor" in _args:
     i = _args.index("--motor")
     MOTOR = _args[i + 1]
     del _args[i:i + 2]
+SALTEAR, PREVIO = 0, None
+if "--retomar" in _args:
+    i = _args.index("--retomar")
+    PREVIO = _args[i + 1]
+    del _args[i:i + 2]
 MESES = int(_args[0]) if _args else 2
 
 
@@ -51,8 +56,21 @@ def main():
     ruta = f"datos/candidatos-{sello}.json"
     os.makedirs("datos", exist_ok=True)
 
-    candidatos, conteo, t0 = [], Counter(), time.time()
+    candidatos, saltear = [], 0
+    if PREVIO:
+        # Un barrido de una hora se corta por cualquier cosa. Retomar donde
+        # quedó vale más que empezar de nuevo: el orden de los correos es
+        # estable, así que basta con saltear los ya tanteados.
+        d = json.load(open(PREVIO, encoding="utf-8"))
+        candidatos = d["candidatos"]
+        saltear = d["revisados"]
+        print(f"  retomando desde {PREVIO}: {saltear} ya tanteados, "
+              f"{len(candidatos)} candidatos\n")
+
+    conteo, t0 = Counter(), time.time()
     for n, c in enumerate(pendientes, 1):
+        if n <= saltear:
+            continue
         try:
             a = clasificar_una_vez(sistema, c, MOTOR)["categoria"]
             b = clasificar_una_vez(sistema, c, MOTOR)["categoria"]
@@ -73,7 +91,8 @@ def main():
 
         if n % 10 == 0 or n == len(pendientes):
             transcurrido = time.time() - t0
-            faltan = (transcurrido / n) * (len(pendientes) - n)
+            hechos = n - saltear
+            faltan = (transcurrido / hechos) * (len(pendientes) - n)
             print(f"  {n}/{len(pendientes)}  candidatos: {len(candidatos)}  "
                   f"({transcurrido/60:.0f} min, faltan ~{faltan/60:.0f})", flush=True)
 
