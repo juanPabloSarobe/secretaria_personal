@@ -452,6 +452,63 @@ def marcar_importante(etiqueta, direccion):
 
 
 # ------------------------------------------------------------------ Correo
+# Cómo nombrar cada tipo de archivo en el mensaje. Lo que no está acá se
+# muestra con el subtipo MIME en mayúsculas, que es feo pero informativo.
+TIPOS_ADJUNTO = {
+    "application/pdf": "PDF",
+    "image/jpeg": "imagen JPG", "image/png": "imagen PNG",
+    "image/heic": "imagen HEIC", "image/tiff": "imagen TIFF",
+    "application/vnd.ms-excel": "planilla Excel",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "planilla Excel",
+    "application/msword": "documento Word",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "documento Word",
+    "text/xml": "XML", "application/xml": "XML",
+    "application/zip": "ZIP", "text/csv": "CSV",
+    "message/rfc822": "correo reenviado",
+}
+
+
+def adjuntos(msg):
+    """Qué vino adjunto: nombre, tipo y tamaño. El contenido no se abre.
+
+    Un correo escaneado desde el celular no tiene cuerpo —el de Genius Scan
+    trae solo su propia publicidad— y todo lo que importa está en el PDF. Sin
+    esta lista llega como un correo vacío y no hay nada que clasificar.
+    """
+    fuera = []
+    for parte in msg.walk():
+        if parte.get_content_maintype() == "multipart":
+            continue
+        nombre = parte.get_filename()
+        if not nombre:
+            continue
+        # Content-ID significa que el cuerpo HTML referencia esa parte con
+        # cid:… — o sea que va incrustada, no adjunta. Es lo que distingue el
+        # logo de la firma de Outlook (image001.jpg, sin Content-Disposition)
+        # del remito escaneado (disposition attachment, sin Content-ID). Por
+        # el nombre o el tamaño no se distinguen: hay logos de 25 KB.
+        if parte.get("Content-ID") or parte.get_content_disposition() == "inline":
+            continue
+        try:
+            bytes_ = len(parte.get_payload(decode=True) or b"")
+        except Exception:
+            bytes_ = 0
+        fuera.append({"nombre": str(nombre)[:120],
+                      "tipo": parte.get_content_type(),
+                      "kb": round(bytes_ / 1024)})
+    return fuera[:10]
+
+
+def adjuntos_legibles(lista):
+    """Una línea por adjunto, o cadena vacía si no hay ninguno."""
+    if not lista:
+        return ""
+    return "\n".join(
+        f"📎 {a['nombre']} — "
+        f"{TIPOS_ADJUNTO.get(a['tipo'], a['tipo'].split('/')[-1].upper()[:18])}"
+        f", {a['kb']} KB" for a in lista)
+
+
 def texto_plano(msg):
     """Devuelve el cuerpo legible del mensaje."""
     cuerpo = ""
@@ -543,8 +600,47 @@ def traer_correos(n, desde=None):
             "fecha": str(msg.get("Date", "")),
             "message_id": str(msg.get("Message-ID", "")),
             "cuerpo": texto_plano(msg)[:4000],
+            "adjuntos": adjuntos(msg),
         })
     M.logout()
+    return correos
+
+
+def completar_adjuntos(correos):
+    """Rellena los adjuntos de correos guardados antes de que se listaran.
+
+    Los barridos hechos hasta hoy no los tienen. Se buscan por Message-ID y no
+    por número de secuencia: el número cambia cuando se archiva o se borra
+    algo, y para entonces apunta a otro correo.
+    """
+    faltan = [c for c in correos if not c.get("adjuntos") and c.get("message_id")
+              and "adjuntos" not in c]
+    if not faltan:
+        return correos
+    print(f"Releyendo {len(faltan)} correos para ver qué traían adjunto…", flush=True)
+    M = imaplib.IMAP4_SSL(os.environ["IMAP_HOST"], int(os.environ["IMAP_PORT"]),
+                          timeout=40)
+    M.login(os.environ["IMAP_USER"], os.environ["IMAP_PASSWORD"])
+    M.select("INBOX", readonly=True)
+    con, sin = 0, 0
+    for c in faltan:
+        c["adjuntos"] = []
+        try:
+            typ, d = M.uid("SEARCH", None, "HEADER", "Message-ID",
+                           f'"{c["message_id"]}"')
+            uids = d[0].split()
+            if not uids:
+                sin += 1
+                continue
+            typ, d = M.uid("FETCH", uids[-1], "(BODY.PEEK[])")
+            msg = email.message_from_bytes(d[0][1], policy=email.policy.default)
+            c["adjuntos"] = adjuntos(msg)
+            con += 1 if c["adjuntos"] else 0
+        except Exception as e:
+            sin += 1
+    M.logout()
+    print(f"  {con} con adjuntos, {len(faltan) - con - sin} sin, "
+          f"{sin} que ya no están en la bandeja", flush=True)
     return correos
 
 
@@ -752,6 +848,25 @@ def clasificar(sistema, correo, preferido=None, pasadas=3):
             "emitidas": emitidas}
 
 
+def _adjuntos_para_modelo(correo):
+    """Los adjuntos como texto para el prompt, avisando si el cuerpo está vacío.
+
+    El aviso importa: un remito escaneado llega con el cuerpo en blanco, y sin
+    esa aclaración el modelo lee un correo sin contenido y lo trata como ruido.
+    """
+    lista = correo.get("adjuntos") or []
+    if not lista:
+        return ""
+    linea = "Adjuntos: " + "; ".join(
+        f"{a['nombre']} ({TIPOS_ADJUNTO.get(a['tipo'], a['tipo'])}, {a['kb']} KB)"
+        for a in lista)
+    if len((correo.get("cuerpo") or "").strip()) < 200:
+        linea += ("\n(El cuerpo está casi vacío: el contenido real del correo "
+                  "está en el adjunto, que no podés leer. Clasificá por el "
+                  "asunto, el remitente y el nombre del archivo.)")
+    return linea + "\n"
+
+
 def clasificar_una_vez(sistema, correo, preferido=None):
     disponibles = motores(preferido)
     for n, (nombre, base, key, modelo) in enumerate(disponibles):
@@ -762,7 +877,9 @@ def clasificar_una_vez(sistema, correo, preferido=None):
                 {"role": "user", "content":
                  f"Fecha: {correo.get('fecha') or '(desconocida)'}\n"
                  f"De: {correo['de']}\nPara: {correo['para']}\nCC: {correo['cc'] or '(nadie)'}\n"
-                 f"Asunto: {correo['asunto']}\n\n{correo['cuerpo'][:3000]}"},
+                 f"Asunto: {correo['asunto']}\n"
+                 f"{_adjuntos_para_modelo(correo)}"
+                 f"\n{correo['cuerpo'][:3000]}"},
             ],
             # 3000 y no 500: los modelos de razonamiento gastan tokens pensando
             # antes de escribir, y con un presupuesto corto se cortan justo antes
@@ -873,7 +990,8 @@ def main():
         traidos = traer_correos(pozo)
         tope = CANTIDAD
 
-    correos = [c for c in traidos if identidad(c) not in ya][:tope]
+    correos = completar_adjuntos(
+        [c for c in traidos if identidad(c) not in ya][:tope])
     repetidos = len(traidos) - len([c for c in traidos if identidad(c) not in ya])
     print(f"  {len(traidos)} leídos, {repetidos} ya respondidos antes, "
           f"{len(correos)} para revisar.\n")
@@ -989,7 +1107,8 @@ def main():
                  f"<b>De:</b> {html.escape(recortar(c['de'], 90))}\n"
                  f"<b>Para:</b> {html.escape(recortar(c['para'], 90))}\n"
                  f"<b>CC:</b> {html.escape(recortar(c['cc'] or '(nadie)', 90))}\n"
-                 f"<b>Asunto:</b> {html.escape(recortar(c['asunto'], 120))}\n\n"
+                 f"<b>Asunto:</b> {html.escape(recortar(c['asunto'], 120))}\n"
+                 f"{html.escape(adjuntos_legibles(c.get('adjuntos')))}\n\n"
                  f"<pre>{html.escape(cuerpo)}</pre>\n\n¿Qué correspondía?")
         m = tg("sendMessage", chat_id=chat, text=texto, parse_mode="HTML",
                reply_markup=teclado(idx))
