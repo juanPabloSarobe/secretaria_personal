@@ -9,7 +9,7 @@ clasificador y guarda todo.
 NO mueve correos. NO envía correos. NO modifica la casilla de ninguna forma.
 Lo único que sale hacia afuera son mensajes de Telegram para vos.
 
-Uso:  python3 simulacro.py [cantidad] [--motor groq|nvidia|ollama]
+Uso:  python3 simulacro.py [cantidad] [--hoy] [--motor groq|nvidia|ollama]
 """
 import email, email.policy, email.utils, glob, hashlib, html, imaplib, json, os, random, re, sys, time
 from collections import Counter
@@ -17,19 +17,27 @@ import urllib.error, urllib.parse, urllib.request
 from datetime import datetime, timezone
 
 def parsear_argumentos(argv):
-    """(cantidad, motor) a partir de la línea de comandos."""
+    """(cantidad, motor, desde) a partir de la línea de comandos.
+
+    --hoy trae los correos del día en lugar de los últimos N.
+    """
     args = list(argv)
     motor = None
     if "--motor" in args:
         i = args.index("--motor")
         motor = args[i + 1] if i + 1 < len(args) else None
         del args[i:i + 2]
-    return (int(args[0]) if args else 10), motor
+    desde = None
+    if "--hoy" in args:
+        args.remove("--hoy")
+        desde = datetime.now().date()
+    return (int(args[0]) if args else 10), motor, desde
 
 
 # Solo al ejecutarse como script: importado desde otra herramienta, los
 # argumentos de la línea de comandos son de ESA herramienta, no de esta.
-CANTIDAD, MOTOR = parsear_argumentos(sys.argv[1:]) if __name__ == "__main__" else (10, None)
+CANTIDAD, MOTOR, DESDE = (parsear_argumentos(sys.argv[1:])
+                          if __name__ == "__main__" else (10, None, None))
 UA = {"User-Agent": "secretaria-personal/0.1"}  # sin esto, Cloudflare devuelve 403/1010
 
 CATEGORIAS = {
@@ -492,12 +500,26 @@ def ids_respondidos():
     return vistos
 
 
-def traer_correos(n):
+MESES_IMAP = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+              "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+
+def traer_correos(n, desde=None):
+    """Los últimos n correos, o todos los recibidos desde una fecha.
+
+    `desde` es un date. IMAP compara por día, no por hora, así que SINCE con
+    la fecha de hoy devuelve exactamente los de hoy.
+    """
     M = imaplib.IMAP4_SSL(os.environ["IMAP_HOST"], int(os.environ["IMAP_PORT"]), timeout=40)
     M.login(os.environ["IMAP_USER"], os.environ["IMAP_PASSWORD"])
     M.select("INBOX", readonly=True)                   # readonly: no toca banderas
-    typ, data = M.search(None, "ALL")
-    ids = data[0].split()[-n:]
+    if desde:
+        criterio = f"{desde.day:02d}-{MESES_IMAP[desde.month - 1]}-{desde.year}"
+        typ, data = M.search(None, "SINCE", criterio)
+        ids = data[0].split()
+    else:
+        typ, data = M.search(None, "ALL")
+        ids = data[0].split()[-n:]
     correos = []
     for i in reversed(ids):
         # BODY.PEEK en vez de RFC822: no marca el correo como leído
@@ -772,12 +794,18 @@ def main():
     # CANTIDAD son correos NUEVOS para revisar, no correos a traer. Como ya hay
     # tandas respondidas, hay que traer de más para llegar a esa cantidad.
     ya = ids_respondidos()
-    pozo = min(CANTIDAD + len(ya) + 10, 400)
-    print(f"Trayendo hasta {pozo} correos (sin marcarlos como leídos), "
-          f"para juntar {CANTIDAD} sin revisar…")
-    traidos = traer_correos(pozo)
+    if DESDE:
+        print(f"Trayendo los correos desde {DESDE} (sin marcarlos como leídos)…")
+        traidos = traer_correos(0, DESDE)
+        tope = len(traidos)
+    else:
+        pozo = min(CANTIDAD + len(ya) + 10, 400)
+        print(f"Trayendo hasta {pozo} correos (sin marcarlos como leídos), "
+              f"para juntar {CANTIDAD} sin revisar…")
+        traidos = traer_correos(pozo)
+        tope = CANTIDAD
 
-    correos = [c for c in traidos if identidad(c) not in ya][:CANTIDAD]
+    correos = [c for c in traidos if identidad(c) not in ya][:tope]
     repetidos = len(traidos) - len([c for c in traidos if identidad(c) not in ya])
     print(f"  {len(traidos)} leídos, {repetidos} ya respondidos antes, "
           f"{len(correos)} para revisar.\n")
