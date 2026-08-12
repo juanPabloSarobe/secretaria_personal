@@ -195,10 +195,27 @@ demás se aprende.
   hablando. Un `De: Lic.Sarobe Juan Pablo` en la parte citada significa que JP
   escribió el mensaje anterior.
 
-- **Si JP escribió el mensaje anterior del hilo, la respuesta es TUYO.** No se
+- **Si el mensaje responde DIRECTAMENTE a algo que escribió JP, es TUYO.** No se
   deriva a nadie, aunque el tema sea de Enzo o de Natalia y aunque ellos figuren
   en copia. JP está llevando esa conversación: meter a otra persona en el medio
   le anuncia al cliente que cambió de interlocutor.
+
+- **LÍMITE: haber participado en el hilo no alcanza.** Lo que decide es a quién
+  le contesta ESTE mensaje. Si JP escribió hace varios mensajes pero los últimos
+  intercambios son entre otras dos personas y él quedó en copia, la respuesta es
+  **DELEGADO**, no TUYO.
+
+  *La distinción de fondo, en palabras de JP:* «está bien que yo me entere, pero
+  en este caso yo no tengo que hacer nada». **Estar al tanto no es lo mismo que
+  tener una acción pendiente**, y esa diferencia es exactamente lo que separa
+  DELEGADO de TUYO. Ante la duda, preguntarse qué tendría que hacer JP con ese
+  correo: si la respuesta es "leerlo", es DELEGADO.
+
+  (aprendida 2026-08-12 — Daniela Ramos, "Re: Situación conductores OPS WM":
+  JP había indicado qué hacer varios mensajes atrás, Alejo lo confirmó, y este
+  correo es Daniela avisándole a Alejo que ya está hecho. El clasificador vio
+  "JP inició la conversación" y lo escaló. JP: "es una respuesta entre 2
+  personas que estaban en copia... yo no tengo que hacer nada")
 
   *Cómo reconocerlo sin la carpeta de enviados:* buscar en el cuerpo citado una
   línea `De:` seguida del nombre o la casilla de JP.
@@ -213,7 +230,14 @@ demás se aprende.
   TUYO**, sin importar quién esté en copia. No es tema de Enzo aunque suene
   técnico, ni de Natalia aunque haya coordinación de por medio.
 
-- **IMSEG** (`imseg.com`) es de JP siempre, por la misma razón.
+- **IMSEG** (`imseg.com`): los correos **dirigidos a JP** son suyos, por la
+  misma razón.
+
+  **El dominio por sí solo no alcanza.** Antes de aplicar esta regla hay que
+  pasar el filtro de la sección "Quién está en el hilo": si el mensaje es un
+  intercambio entre otras dos personas y JP solo figura en copia, es DELEGADO,
+  venga de IMSEG o de donde venga. Un dominio no convierte en acción algo que
+  es información.
 
   (aprendida 2026-08-11 — IMSEG, "Situación conductores OPS WM / PLUSPETROL":
   el clasificador vio a Natalia en copia y dijo DELEGADO. JP: "todo lo de
