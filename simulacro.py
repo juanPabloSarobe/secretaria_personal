@@ -623,6 +623,11 @@ Respondé SOLO un objeto JSON, sin texto alrededor:
 
 # Más allá de esto no es un límite pasajero sino cuota agotada: no tiene sentido
 # dormir, conviene cambiar de motor. Groq llegó a mandar Retry-After de 1462s.
+# Nemotron razona antes de contestar y no manda nada hasta terminar: con 60s
+# se cortaba la conexión a mitad de pensamiento y el correo quedaba sin
+# clasificar. Es el motor único mientras ollama esté fuera, así que conviene
+# tenerle paciencia.
+ESPERA_RESPUESTA = 180
 ESPERA_MAXIMA = 90
 
 # Tope para que JP explique un caso. Pasado esto se sigue sin explicación:
@@ -688,7 +693,7 @@ def _pedir(base, key, cuerpo, intentos=4):
                  "Content-Type": "application/json"})
     for intento in range(intentos):
         try:
-            with urllib.request.urlopen(req, timeout=60) as r:
+            with urllib.request.urlopen(req, timeout=ESPERA_RESPUESTA) as r:
                 return json.load(r)
         except urllib.error.HTTPError as e:
             if e.code != 429 and e.code < 500:
@@ -702,6 +707,15 @@ def _pedir(base, key, cuerpo, intentos=4):
             espera = pedida or min(2 ** intento, 30)
             print(f"      (HTTP {e.code} — esperando {espera:.0f}s)", flush=True)
             time.sleep(espera + 0.5)
+        except OSError as e:
+            # Corte de red o de paciencia: la conexión se cayó, o el modelo
+            # tardó más de lo que esperamos. No es cuota agotada —cambiar de
+            # motor por esto sería tirar el bueno— así que se reintenta acá.
+            if intento == intentos - 1:
+                raise
+            espera = min(2 ** intento, 30)
+            print(f"      (red: {e} — reintento en {espera:.0f}s)", flush=True)
+            time.sleep(espera)
 
 
 def clasificar(sistema, correo, preferido=None, pasadas=3):
@@ -994,9 +1008,14 @@ def main():
                           f"{' / '.join(pred['emitidas'])}</i>")
         else:
             desacuerdo = ""
-        veredicto = (("✅ <b>Coincidimos</b>" if coincide else
-                      f"📚 <b>Aprendido</b> — yo dije <b>{pred['categoria']}</b>")
-                     + desacuerdo)
+        if pred["categoria"] == "ERROR":
+            # No me equivoqué: no llegué a opinar. Decir "aprendido" acá sería
+            # atribuirme un criterio que no tuve.
+            veredicto = "⚠️ <b>No pude clasificarlo</b> — queda tu respuesta"
+        else:
+            veredicto = (("✅ <b>Coincidimos</b>" if coincide else
+                          f"📚 <b>Aprendido</b> — yo dije <b>{pred['categoria']}</b>")
+                         + desacuerdo)
         tg_suave("editMessageText", chat_id=chat, message_id=msg_id, parse_mode="HTML",
            text=texto.replace("¿Qué correspondía?",
                               f"Vos: <b>{eleccion}</b>\n{veredicto}\n"
