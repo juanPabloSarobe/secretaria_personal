@@ -17,9 +17,12 @@ import urllib.error, urllib.parse, urllib.request
 from datetime import datetime, timezone
 
 def parsear_argumentos(argv):
-    """(cantidad, motor, desde) a partir de la línea de comandos.
+    """(cantidad, motor, desde, lista) a partir de la línea de comandos.
 
     --hoy trae los correos del día en lugar de los últimos N.
+    --lista <archivo> revisa una lista corta de explorar.py en vez de la
+    bandeja: los correos ya vienen con el texto adentro, así que ni se abre
+    el IMAP.
     """
     args = list(argv)
     motor = None
@@ -27,17 +30,23 @@ def parsear_argumentos(argv):
         i = args.index("--motor")
         motor = args[i + 1] if i + 1 < len(args) else None
         del args[i:i + 2]
+    lista = None
+    if "--lista" in args:
+        i = args.index("--lista")
+        lista = args[i + 1] if i + 1 < len(args) else None
+        del args[i:i + 2]
     desde = None
     if "--hoy" in args:
         args.remove("--hoy")
         desde = datetime.now().date()
-    return (int(args[0]) if args else 10), motor, desde
+    return (int(args[0]) if args else 10), motor, desde, lista
 
 
 # Solo al ejecutarse como script: importado desde otra herramienta, los
 # argumentos de la línea de comandos son de ESA herramienta, no de esta.
-CANTIDAD, MOTOR, DESDE = (parsear_argumentos(sys.argv[1:])
-                          if __name__ == "__main__" else (10, None, None))
+CANTIDAD, MOTOR, DESDE, LISTA = (parsear_argumentos(sys.argv[1:])
+                                if __name__ == "__main__"
+                                else (10, None, None, None))
 UA = {"User-Agent": "secretaria-personal/0.1"}  # sin esto, Cloudflare devuelve 403/1010
 
 CATEGORIAS = {
@@ -802,6 +811,21 @@ def fecha_legible(cabecera):
             f"{d.strftime('%H:%M')} · {antiguedad}")
 
 
+def valor_didactico(correo):
+    """Cuánto se aprende preguntando por este correo. Menor = preguntar antes.
+
+    El tanteo del barrido no decide nada —lo hizo un modelo chico y sin
+    contexto— pero sí sirve para ordenar la cola. Donde el modelo se
+    contradijo entre pasadas hay ambigüedad real, y la respuesta de JP la
+    resuelve. Donde vio rutina, lo más probable es que confirme lo que ya
+    sabemos, y eso gasta su tiempo sin enseñar nada.
+    """
+    a, b = (correo.get("tanteo") or ["", ""])[:2]
+    if a != b:
+        return 0
+    return {"DUDA": 1, "TUYO": 2, "ENZO": 2, "NATALIA": 2}.get(a, 3)
+
+
 def main():
     assert os.environ.get("MODO_SIMULACRO", "true").lower() == "true", \
         "MODO_SIMULACRO no está en true. Abortando por seguridad."
@@ -817,7 +841,14 @@ def main():
     # CANTIDAD son correos NUEVOS para revisar, no correos a traer. Como ya hay
     # tandas respondidas, hay que traer de más para llegar a esa cantidad.
     ya = ids_respondidos()
-    if DESDE:
+    if LISTA:
+        # La lista corta ya trae los correos enteros: no hace falta el IMAP.
+        d = json.load(open(LISTA, encoding="utf-8"))
+        traidos = sorted(d["candidatos"], key=valor_didactico)
+        tope = CANTIDAD
+        print(f"Lista corta de {LISTA}: {len(traidos)} candidatos de "
+              f"{d['total']} barridos. Van primero los que más enseñan.")
+    elif DESDE:
         print(f"Trayendo los correos desde {DESDE} (sin marcarlos como leídos)…")
         traidos = traer_correos(0, DESDE)
         tope = len(traidos)
