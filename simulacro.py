@@ -626,13 +626,19 @@ ESPERA_MAXIMA_EXPLICACION = 900
 MOTORES = {
     "groq":   ("GROQ_BASE_URL",   "GROQ_API_KEY",   "llama-3.3-70b-versatile"),
     "nvidia": ("NVIDIA_BASE_URL", "NVIDIA_API_KEY", "nvidia/nemotron-3-super-120b-a12b"),
-    "ollama": ("OLLAMA_BASE_URL", "OLLAMA_API_KEY", "qwen2.5:14b"),
+    # "ollama": ("OLLAMA_BASE_URL", "OLLAMA_API_KEY", "qwen2.5:14b"),  # ver nota abajo
 }
 
 # Orden de uso: el primero es el principal y los siguientes son respaldo
 # automático cuando el anterior agota su cuota. Se puede anteponer uno desde
 # la línea de comandos con --motor <nombre>.
-PREFERENCIA = ["groq", "nvidia", "ollama"]
+#
+# 2026-08-12: ollama queda FUERA de la cadena por pedido de JP. La Mac no
+# puede tener dos modelos cargados a la vez y él lo necesita para otro
+# proyecto. Volver a agregarlo solo cuando él lo habilite. nvidia va primero
+# porque groq agota su cuota diaria con el entrenamiento; cuando se repone,
+# conviene volver a ponerlo adelante — es más de cincuenta veces más rápido.
+PREFERENCIA = ["nvidia", "groq"]
 
 
 def motores(preferido=None):
