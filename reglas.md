@@ -152,6 +152,36 @@ demás se aprende.
   mantenimiento programado. El clasificador lo derivó a Enzo por el vocabulario
   técnico, JP lo marcó como ruido)
 
+### Excepciones a "un hilo de trabajo nunca es ruido"
+
+La regla de que un correo dentro de un hilo de trabajo no es ruido tiene dos
+excepciones, y las dos son mecánicas:
+
+- **Acuses de lectura y de entrega son siempre RUIDO.** Asuntos que empiezan
+  con `Read:`, `Leído:`, `Lido:`, `Delivered:`, `Non-Delivery Report`, o cuerpos
+  que solo dicen que un mensaje fue leído o entregado. Los genera el programa de
+  correo, no una persona, y no hay nada que hacer con ellos.
+
+  (aprendida 2026-08-12 — "Read: RE: Algoritmo MCI LASC": el clasificador lo
+  dejó fuera de ruido por estar dentro de un hilo de trabajo real)
+
+- **Avisos de rutina de que una factura está disponible** —de telefonía,
+  servicios públicos, plataformas— son **RUIDO**. Es distinto de una factura
+  con problema o de un pago rechazado, que sí exigen acción y son de Natalia.
+  La diferencia está en si algo salió mal o simplemente hay un resumen nuevo.
+
+  (aprendida 2026-08-12 — Claro, "Ya podés acceder a tu factura")
+
+### Contratos y acuerdos comerciales
+
+- **Un contrato firmado, un acuerdo o un enlace de pago enviado directamente a
+  JP, sin nadie más en Para ni en CC, es TUYO.** No importa que mencione
+  facturas: no es un tema de facturación sino una relación comercial que él
+  lleva. Nadie del equipo está en ese hilo para hacerse cargo.
+
+  (aprendida 2026-08-12 — Mauro Micheletti de Orbcomm, "Contrato, facturas de
+  SC1000 y link de pago", dirigido solo a JP)
+
 ### Currículums y envíos masivos
 
 - Un **CV espontáneo**, sin búsqueda abierta de por medio, es **RUIDO**. No es

@@ -595,6 +595,12 @@ PASO 3 — ¿El correo es para JP, o es una escalación?
 PASO 4 — ¿De qué se trata, y quién ya está en el hilo?
   Determiná el responsable por el tema (Enzo o Natalia). Después fijate si su
   casilla aparece en De, en Para o en CC.
+
+  Compará por DIRECCIÓN DE CORREO, no por el nombre que se muestra. Un
+  destinatario puede figurar como "Tecnicos2 <tecnicos@fullcontrolgps.com.ar>":
+  lo que cuenta es tecnicos@fullcontrolgps.com.ar, sin importar cómo lo
+  apodaron. Lo mismo con administracion@fullcontrolgps.com.ar.
+
     - Aparece en alguno de los tres  -> DELEGADO
     - No aparece en ninguno          -> ENZO o NATALIA, según corresponda
 
