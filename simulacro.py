@@ -375,17 +375,31 @@ def es_ruido_conocido(correo, direcciones, dominios):
 
 
 def protegido(correo):
-    """Remitentes que nunca se automatizan, por más que parezcan ruido.
+    """Remitentes que nunca se archivan solos, por más que parezcan ruido.
 
-    Los clientes importantes y los asuntos personales están en el roster
-    justamente porque JP no quiere perdérselos.
+    Cubre dos archivos, y el segundo se agregó por un error real: el filtro
+    archivó una promoción de SiPago pese a que reglas.md dice explícitamente
+    que nada de SiPago es ruido. JP no llegó a verlo nunca.
+
+    El principio es simple: **sobre lo que JP ya se pronunció, el sistema no
+    decide solo.** Si su nombre o su dominio figura en el roster o en las
+    reglas, el correo se le muestra. Puede que la regla esté de más, o que
+    corresponda afinarla — pero eso lo decide él viendo el caso, no un
+    clasificador saltándose lo que él escribió.
     """
-    roster = open("roster.md", encoding="utf-8").read().lower()
     _, dire = email.utils.parseaddr(correo.get("de", ""))
     dire = dire.lower().strip()
     if not dire or "@" not in dire:
         return False
-    return dire in roster or dire.split("@")[1] in roster
+    dominio = dire.split("@")[1]
+    for archivo in ("roster.md", "reglas.md"):
+        try:
+            texto = open(archivo, encoding="utf-8").read().lower()
+        except FileNotFoundError:
+            continue
+        if dire in texto or dominio in texto:
+            return True
+    return False
 
 
 # ------------------------------------------------------------------ Roster
@@ -928,11 +942,15 @@ def main():
               f"{'ok' if coincide else 'DIFIERE'}  ({t_clas:.1f}s clas, {t_espera:.0f}s vos)")
 
     # ---------------------------------------------------------- resumen
-    aciertos = sum(r["coincide"] for r in resultados)
-    n = len(resultados)
-    t_clas_prom = sum(r["seg_clasificacion"] for r in resultados) / n
-    t_jp_prom = sum(r["seg_decision_jp"] for r in resultados) / n
-    fallos = [r for r in resultados if not r["coincide"]]
+    revisados = [r for r in resultados if not r.get("automatico")]
+    aciertos = sum(r["coincide"] for r in revisados)
+    n = len(revisados)
+    if not revisados:                       # tanda entera archivada sola
+        print("\n  Nada que revisar: todo se archivó como ruido conocido.")
+        return
+    t_clas_prom = sum(r["seg_clasificacion"] for r in revisados) / n
+    t_jp_prom = sum(r["seg_decision_jp"] for r in revisados) / n
+    fallos = [r for r in revisados if not r["coincide"]]
 
     detalle = "\n\n".join(
         f"• <b>{r['correcto']}</b> (yo dije {r['prediccion']['categoria']}) — "
@@ -943,7 +961,7 @@ def main():
 
     tg("sendMessage", chat_id=chat, parse_mode="HTML", text=(
         f"🧪 <b>Simulacro terminado</b>\n\n"
-        f"Coincidimos en <b>{aciertos} de {n}</b>\n\n"
+        f"Coincidimos en <b>{aciertos} de {n}</b> de los que revisaste\n\n"
         f"⏱ Yo tardé <b>{t_clas_prom:.1f}s</b> por correo\n"
         f"⏱ Vos tardaste <b>{t_jp_prom:.0f}s</b> por correo\n"
         f"⏱ Total: <b>{(time.time()-t_inicio)/60:.1f} min</b>\n\n"
