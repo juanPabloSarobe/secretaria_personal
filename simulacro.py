@@ -47,6 +47,12 @@ def parsear_argumentos(argv):
 CANTIDAD, MOTOR, DESDE, LISTA = (parsear_argumentos(sys.argv[1:])
                                 if __name__ == "__main__"
                                 else (10, None, None, None))
+# Identifica a ESTA corrida. Los botones de Telegram siguen vivos para
+# siempre: una tanda que se cortó deja mensajes con botones "3/12" que, si se
+# tocan, la tanda siguiente acepta como respuesta a SU correo 3 —que es otro
+# correo—. El número de pregunta no alcanza para distinguirlos porque toda
+# tanda empieza en 1. Con el token, los botones viejos se rechazan solos.
+TANDA = f"{os.getpid() % 10000:04d}"
 UA = {"User-Agent": "secretaria-personal/0.1"}  # sin esto, Cloudflare devuelve 403/1010
 
 CATEGORIAS = {
@@ -123,20 +129,20 @@ def teclado(idx):
     orden = ["RUIDO", "DELEGADO", "ENZO", "NATALIA", "TUYO", "DUDA"]
     filas, fila = [], []
     for cat in orden:
-        fila.append({"text": CATEGORIAS[cat], "callback_data": f"c|{idx}|{cat}"})
+        fila.append({"text": CATEGORIAS[cat], "callback_data": f"c|{TANDA}-{idx}|{cat}"})
         if len(fila) == 2:
             filas.append(fila); fila = []
     if fila:
         filas.append(fila)
-    filas.append([{"text": "⭐ Cliente importante", "callback_data": f"i|{idx}|0"}])
+    filas.append([{"text": "⭐ Cliente importante", "callback_data": f"i|{TANDA}-{idx}|0"}])
     return {"inline_keyboard": filas}
 
 
 def teclado_direcciones(idx, direcciones):
     """Lista de direcciones del correo, para marcar cuál es el cliente importante."""
-    filas = [[{"text": f"⭐ {etiqueta}"[:60], "callback_data": f"d|{idx}|{n}"}]
+    filas = [[{"text": f"⭐ {etiqueta}"[:60], "callback_data": f"d|{TANDA}-{idx}|{n}"}]
              for n, (etiqueta, _) in enumerate(direcciones)]
-    filas.append([{"text": "← volver", "callback_data": f"v|{idx}|0"}])
+    filas.append([{"text": "← volver", "callback_data": f"v|{TANDA}-{idx}|0"}])
     return {"inline_keyboard": filas}
 
 
@@ -155,7 +161,7 @@ def esperar_respuesta(idx, offset, msg_id, texto, direcciones):
             if not cq:
                 continue
             partes = cq["data"].split("|")
-            if len(partes) != 3 or partes[1] != str(idx):
+            if len(partes) != 3 or partes[1] != f"{TANDA}-{idx}":
                 tg_suave("answerCallbackQuery", callback_query_id=cq["id"],
                    text="Ese botón es de otro correo, ya pasó.")
                 continue
@@ -249,7 +255,7 @@ def pedir_explicacion(idx, offset, esperado, dicho):
         "<i>Con esto escribo la regla. Sin esto solo sé que me equivoqué, "
         "no cómo no volver a equivocarme.</i>"),
         reply_markup={"inline_keyboard": [[
-            {"text": "⏭ Saltear", "callback_data": f"x|{idx}|0"}]]})
+            {"text": "⏭ Saltear", "callback_data": f"x|{TANDA}-{idx}|0"}]]})
 
     # Tope duro: sin esto, un fallo de red mientras se procesa un audio deja la
     # tanda esperando para siempre y a JP mirando el teléfono sin saberlo.
@@ -270,7 +276,7 @@ def pedir_explicacion(idx, offset, esperado, dicho):
             cq = u.get("callback_query")
             if cq:
                 tg_suave("answerCallbackQuery", callback_query_id=cq["id"])
-                if cq["data"].startswith(f"x|{idx}|"):
+                if cq["data"].startswith(f"x|{TANDA}-{idx}|"):
                     return None, offset
                 continue
             m = u.get("message") or u.get("edited_message") or {}
