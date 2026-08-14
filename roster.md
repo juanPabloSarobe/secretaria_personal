@@ -7,9 +7,16 @@ Se ocupa de:
 - Programación de equipos y reprogramaciones remotas
 - Análisis y borrado de infracciones
 - Análisis de funcionamiento y de datos de equipos GPS
-- Geocercas de velocidad
+- Geocercas de velocidad, y cambios de zona y de velocidad de zona
 - **Configuración de usuarios y de conductores** en la plataforma
+- **Obtención de IMEIs** — están en la memoria del equipo, no en el sistema:
+  hay que mandar una programación remota para leerlos
+- **Certificados de calibración técnica** — algunos clientes los piden como
+  "bajada de tacógrafo"
 - Todo lo referido a programación de equipos
+
+**No se ocupa** del mantenimiento físico de las unidades. Enzo resuelve desde
+el teclado; si hay que viajar hasta el vehículo, es de Natalia.
 
 ## Natalia — Directora administrativa
 **Casilla:** administracion@fullcontrolgps.com.ar
@@ -17,6 +24,9 @@ Se ocupa de:
 Se ocupa de:
 - Facturación y facturación de servicios
 - Coordinación de turnos y coordinación del equipo de trabajo
+- **Mantenimiento físico de unidades** — coordina el turno para que viaje un
+  técnico de campo. Hoy son tres, Lorenzo, Joaquín y Marcelo, y **no tienen
+  correo**: nunca van a figurar en copia de nada
 - Envío de remitos y presupuestos
 - Solicitud de órdenes de compra (OC)
 - Imputación de pagos

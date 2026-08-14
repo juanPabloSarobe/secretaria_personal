@@ -287,3 +287,56 @@ excepciones, y las dos son mecánicas:
   clasificador dijo "administracion@ no está en Para ni en CC" sin advertir que
   era la remitente. JP: "yo solo estoy en copia. Este es un ejemplo de cuando
   estoy en copia de un pedido pero no es para mí")
+
+### Qué es de Enzo y qué no
+
+La frontera no es "suena técnico". Enzo hace lo que se resuelve **desde el
+teclado**; lo que necesita que alguien viaje hasta la unidad no es de él.
+
+- **De Enzo:** programación remota y local de equipos, cambios de zona y de
+  velocidad de zona, obtención de IMEIs, y certificados de calibración técnica
+  —lo que varios clientes llaman "bajada de tacógrafo"—.
+
+- **De Natalia:** el mantenimiento físico de una unidad. Lo pide el cliente
+  como "asistencia" o "mantenimiento", y lo que sigue es coordinar un turno
+  para que vaya un técnico de campo. Hoy son tres —Lorenzo, Joaquín y
+  Marcelo— y **no tienen correo**, así que nunca van a aparecer en copia: que
+  no figure ningún técnico no significa que nadie se esté ocupando.
+
+  (aprendida 2026-08-13 — Andrea Cabezas, "Solicitud de asistencia". El
+  clasificador dijo ENZO por ser mantenimiento técnico. JP: "Enzo no es el
+  responsable de los mantenimientos técnicos físicos, sino de la programación
+  remota de equipos, y programación local... se está pidiendo que un técnico
+  viaje a realizar un mantenimiento de una unidad. Eso lo coordina Natalia")
+
+### Un pedido nuevo no es DELEGADO por tener al responsable en copia
+
+**DELEGADO describe un hilo donde el equipo ya actuó** — contestó, confirmó,
+o avisó que está hecho. Si este mensaje **es el pedido en sí**, la categoría
+es la del responsable del tema, aunque ya esté en copia y aunque nadie tenga
+que reenviarle nada.
+
+La diferencia no es cosmética: de ahí sale el seguimiento. En palabras de JP,
+sobre los cambios de zona y de velocidad: «son lentos y Enzo suele tardar días
+en hacerlos y cargarlos. Estos son ejemplos de casos que hay que darles
+seguimiento y asegurarnos que la tarea se cumpla».
+
+  (aprendida 2026-08-13 — Maria Fabian, "RV: Verificar FULLCONTROL AG 959 OV",
+  y Alejandro Garcetti, "RE: Solicitud de IMEI de equipos FULL CONTROL". En los
+  dos el clasificador dijo DELEGADO con el motivo "Enzo ya en copia". En los
+  dos JP dijo ENZO)
+
+### Pedidos de IMEI
+
+- **Un pedido de IMEIs es de Enzo**, porque los IMEI están en la memoria del
+  equipo y no en el sistema: para obtenerlos hay que mandar una programación
+  remota. Aunque el pedido venga por una integración, la tarea es de Enzo.
+
+- **A JP también le tiene que llegar.** Es de Enzo por la tarea y de JP por la
+  integración; no se elige una y se descarta la otra.
+
+  (aprendida 2026-08-13 — Alejandro Garcetti, "RE: Solicitud de IMEI de equipos
+  FULL CONTROL – Flota OPS y Subcontratistas", en el marco de la integración con
+  IMSEG. JP: "hay que enviar una programación remota para obtener los imei s, y
+  Enzo se encarga de las programaciones remotas. Igualmente está bien que yo
+  esté informado, por ende también me tiene que llegar este correo")
