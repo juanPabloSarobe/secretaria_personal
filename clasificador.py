@@ -62,7 +62,36 @@ PASO 3 — ¿El correo es para JP, o es una escalación?
   desarrollo nuevo, despedida o agradecimiento dirigido a JP, o un asunto de la
   lista de personales. Si es así: TUYO, sin importar el tema.
 
-PASO 4 — ¿De qué se trata, y quién ya está en el hilo?
+PASO 4 — ¿El cliente vuelve a pedir una tarea que sigue sin hacerse?
+  ANTES QUE NADA: si este correo le CONTESTA a un mensaje del equipo —el texto
+  citado justo arriba lo escribió tecnicos@fullcontrolgps.com.ar o
+  administracion@fullcontrolgps.com.ar— entonces el equipo ya actuó y esto es
+  DELEGADO. Este paso no se aplica: seguí al paso siguiente.
+
+  Si no, el paso es angosto a propósito. Se aplica a un PEDIDO CONCRETO de esta
+  lista corta y de ninguna otra cosa:
+    - una programación remota o local de un equipo
+    - un cambio de zona o de velocidad de zona
+    - los IMEI de unos equipos
+    - un certificado de calibración ("bajada de tacógrafo")
+    - un alta de usuario o de contraseña en la plataforma
+  Y solo cuando el cliente INSISTE: repite un pedido que ya había hecho, refuerza
+  el de un colega, o pregunta si lograron avanzar con esa solicitud. En ese caso
+  la respuesta es ENZO y terminás acá.
+
+  Es por el seguimiento: estas tareas se cargan desde el teclado, tardan días, y
+  si nadie las sigue quedan sin hacer. ESTAR EN COPIA NO CANCELA LA TAREA: que
+  tecnicos@fullcontrolgps.com.ar figure en De, en Para o en CC significa que se
+  enteró, no que la tarea esté hecha.
+
+  Nada más entra acá. En particular NO entran, y se deciden en el paso siguiente:
+    - un equipo que dejó de reportar, que no registra movimientos o que anda mal:
+      eso es diagnóstico, no una tarea cargada y pendiente;
+    - el mantenimiento físico de una unidad, un turno o la visita de un técnico;
+    - presupuestos, cotizaciones, facturación, órdenes de compra, infracciones;
+    - un pedido que llega por primera vez.
+
+PASO 5 — ¿De qué se trata, y quién ya está en el hilo?
   Determiná el responsable por el tema (Enzo o Natalia). Después fijate si su
   casilla aparece en De, en Para o en CC.
 
@@ -74,7 +103,7 @@ PASO 4 — ¿De qué se trata, y quién ya está en el hilo?
     - Aparece en alguno de los tres  -> DELEGADO
     - No aparece en ninguno          -> ENZO o NATALIA, según corresponda
 
-PASO 5 — Si no alcanza la información para decidir: DUDA.
+PASO 6 — Si no alcanza la información para decidir: DUDA.
 
 Categorías: RUIDO, DELEGADO, ENZO, NATALIA, TUYO, DUDA.
 
