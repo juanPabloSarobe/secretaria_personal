@@ -23,72 +23,78 @@ import os.path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from clasificador import clasificar_una_vez, motores, prompt_sistema  # noqa: E402
 
-_args = sys.argv[1:]
-MOTOR = None
-if "--motor" in _args:
-    i = _args.index("--motor")
-    MOTOR = _args[i + 1] if i + 1 < len(_args) else None
-    del _args[i:i + 2]
 
-ruta = _args[0] if _args else sorted(glob.glob("datos/simulacro-*.json"))[-1]
-PASADAS = int(_args[1]) if len(_args) > 1 else 3
+def main():
+    args = sys.argv[1:]
+    motor = None
+    if "--motor" in args:
+        i = args.index("--motor")
+        motor = args[i + 1] if i + 1 < len(args) else None
+        del args[i:i + 2]
 
-d = json.load(open(ruta, encoding="utf-8"))
-sistema = prompt_sistema()
-cadena = motores(MOTOR)
+    ruta = args[0] if args else sorted(glob.glob("datos/simulacro-*.json"))[-1]
+    pasadas = int(args[1]) if len(args) > 1 else 3
 
-print(f"archivo : {ruta}")
-print("motores : " + " → ".join(f"{n} ({m})" for n, _, _, m in cadena))
-print(f"pasadas : {PASADAS} por caso\n")
-print(f"{'#':<3} {'JP dijo':<9} {'antes':<9} {'ahora':<9} {'estable':<8} resultado")
-print("-" * 72)
+    d = json.load(open(ruta, encoding="utf-8"))
+    sistema = prompt_sistema()
+    cadena = motores(motor)
 
-antes_ok = ahora_ok = 0
-arreglados, rotos, inestables = [], [], []
+    print(f"archivo : {ruta}")
+    print("motores : " + " → ".join(f"{n} ({m})" for n, _, _, m in cadena))
+    print(f"pasadas : {pasadas} por caso\n")
+    print(f"{'#':<3} {'JP dijo':<9} {'antes':<9} {'ahora':<9} {'estable':<8} resultado")
+    print("-" * 72)
 
-for i, c in enumerate(d["casos"], 1):
-    # fecha y adjuntos incluidos: si el prompt de producción los ve y este no,
-    # la regresión mide un sistema que no es el que corre
-    correo = {k: c.get(k) for k in
-              ("de", "para", "cc", "asunto", "cuerpo", "fecha", "adjuntos")}
-    votos = Counter()
-    for _ in range(PASADAS):
-        try:
-            votos[clasificar_una_vez(sistema, correo, MOTOR)["categoria"]] += 1
-        except Exception as e:                  # un fallo aislado no tira la corrida
-            print(f"{i:<3} error en una pasada: {type(e).__name__}")
-    if not votos:
-        print(f"{i:<3} {c['correcto']:<9} {'—':<9} {'SIN DATO':<9} {'0/' + str(PASADAS):<8} ⚠️  todas las pasadas fallaron")
-        continue
-    ahora, n_ahora = votos.most_common(1)[0]
-    estable = n_ahora == PASADAS
+    antes_ok = ahora_ok = 0
+    arreglados, rotos, inestables = [], [], []
 
-    esperado = c["correcto"]
-    antes = c["prediccion"]["categoria"]
-    ok_antes, ok_ahora = antes == esperado, ahora == esperado
-    antes_ok += ok_antes
-    ahora_ok += ok_ahora
+    for i, c in enumerate(d["casos"], 1):
+        # fecha y adjuntos incluidos: si el prompt de producción los ve y este no,
+        # la regresión mide un sistema que no es el que corre
+        correo = {k: c.get(k) for k in
+                  ("de", "para", "cc", "asunto", "cuerpo", "fecha", "adjuntos")}
+        votos = Counter()
+        for _ in range(pasadas):
+            try:
+                votos[clasificar_una_vez(sistema, correo, motor)["categoria"]] += 1
+            except Exception as e:                  # un fallo aislado no tira la corrida
+                print(f"{i:<3} error en una pasada: {type(e).__name__}")
+        if not votos:
+            print(f"{i:<3} {c['correcto']:<9} {'—':<9} {'SIN DATO':<9} {'0/' + str(pasadas):<8} ⚠️  todas las pasadas fallaron")
+            continue
+        ahora, n_ahora = votos.most_common(1)[0]
+        estable = n_ahora == pasadas
 
-    if not ok_antes and ok_ahora:
-        estado, arreglados = "✅ APRENDIÓ", arreglados + [i]
-    elif ok_antes and not ok_ahora:
-        estado, rotos = "🔴 SE ROMPIÓ", rotos + [i]
-    elif ok_ahora:
-        estado = "   ok"
-    else:
-        estado = "   sigue mal"
-    if not estable:
-        inestables.append(i)
+        esperado = c["correcto"]
+        antes = c["prediccion"]["categoria"]
+        ok_antes, ok_ahora = antes == esperado, ahora == esperado
+        antes_ok += ok_antes
+        ahora_ok += ok_ahora
 
-    print(f"{i:<3} {esperado:<9} {antes:<9} {ahora:<9} "
-          f"{(str(n_ahora) + '/' + str(PASADAS)):<8} {estado}")
+        if not ok_antes and ok_ahora:
+            estado, arreglados = "✅ APRENDIÓ", arreglados + [i]
+        elif ok_antes and not ok_ahora:
+            estado, rotos = "🔴 SE ROMPIÓ", rotos + [i]
+        elif ok_ahora:
+            estado = "   ok"
+        else:
+            estado = "   sigue mal"
+        if not estable:
+            inestables.append(i)
 
-n = len(d["casos"])
-print("-" * 72)
-print(f"antes: {antes_ok}/{n}    ahora: {ahora_ok}/{n}")
-if arreglados:
-    print(f"  aprendió en los casos: {arreglados}")
-if rotos:
-    print(f"  REGRESIONES en los casos: {rotos}  <-- revisar las reglas nuevas")
-if inestables:
-    print(f"  respuesta inestable entre pasadas: {inestables}")
+        print(f"{i:<3} {esperado:<9} {antes:<9} {ahora:<9} "
+              f"{(str(n_ahora) + '/' + str(pasadas)):<8} {estado}")
+
+    n = len(d["casos"])
+    print("-" * 72)
+    print(f"antes: {antes_ok}/{n}    ahora: {ahora_ok}/{n}")
+    if arreglados:
+        print(f"  aprendió en los casos: {arreglados}")
+    if rotos:
+        print(f"  REGRESIONES en los casos: {rotos}  <-- revisar las reglas nuevas")
+    if inestables:
+        print(f"  respuesta inestable entre pasadas: {inestables}")
+
+
+if __name__ == "__main__":
+    main()
