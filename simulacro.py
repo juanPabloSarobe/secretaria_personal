@@ -156,7 +156,7 @@ def pedir_explicacion(idx, offset, esperado, dicho):
             cq = u.get("callback_query")
             if cq:
                 tg_suave("answerCallbackQuery", callback_query_id=cq["id"])
-                if cq["data"].startswith(f"x|{TANDA}-{idx}|"):
+                if es_de_esta_tanda(cq["data"], idx, TANDA) and cq["data"].startswith("x|"):
                     return None, offset
                 continue
             m = u.get("message") or u.get("edited_message") or {}
