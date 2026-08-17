@@ -47,7 +47,10 @@ antes_ok = ahora_ok = 0
 arreglados, rotos, inestables = [], [], []
 
 for i, c in enumerate(d["casos"], 1):
-    correo = {k: c[k] for k in ("de", "para", "cc", "asunto", "cuerpo")}
+    # fecha y adjuntos incluidos: si el prompt de producción los ve y este no,
+    # la regresión mide un sistema que no es el que corre
+    correo = {k: c.get(k) for k in
+              ("de", "para", "cc", "asunto", "cuerpo", "fecha", "adjuntos")}
     votos = Counter()
     for _ in range(PASADAS):
         try:
