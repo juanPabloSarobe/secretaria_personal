@@ -22,6 +22,9 @@
 - **Los permisos globales del equipo deniegan por subcadena** `*exec*`, `*production*`, `*sudo*`. No usar esas letras en nombres de archivo ni de función.
 - **El texto que ve JP va en castellano rioplatense**, igual que el resto del proyecto.
 - **Commits frecuentes**, uno por tarea como mínimo.
+- **La cantidad de tests que dice cada paso es indicativa**, no un
+  requisito: si al implementar hace falta un test más, se agrega. Lo que sí
+  es requisito es que la suite entera pase y que no se borre ningún test.
 
 ---
 
@@ -179,13 +182,24 @@ class Identidad(unittest.TestCase):
              "de": "x", "asunto": "y", "fecha": "z"}
         self.assertEqual(correo.identidad(c), "<scan-002@caesistemas.com.ar>")
 
-    def test_sin_message_id_igual_devuelve_algo_estable(self):
-        """Hay remitentes que no lo mandan. Sin esto, JP contestó dos veces
-        el mismo correo."""
+    def test_sin_message_id_dos_correos_distintos_no_se_confunden(self):
+        """Hay remitentes que no mandan Message-ID. Sin una identidad de
+        reserva, JP contestó dos veces el mismo correo — pero la reserva no
+        puede colapsar dos correos distintos en la misma identidad."""
+        base = {"message_id": "", "de": "a@b.com", "asunto": "Hola",
+                "fecha": "Tue, 5 Aug 2026 11:00:00 -0300"}
+        otro = dict(base, asunto="Otra cosa")
+        self.assertNotEqual(correo.identidad(base), correo.identidad(otro))
+
+    def test_sin_message_id_el_mismo_correo_da_siempre_lo_mismo(self):
+        """Estable entre corridas: si cambiara, cada arranque volvería a
+        procesar correo ya procesado."""
         c = {"message_id": "", "de": "a@b.com", "asunto": "Hola",
              "fecha": "Tue, 5 Aug 2026 11:00:00 -0300"}
-        self.assertEqual(correo.identidad(c), correo.identidad(dict(c)))
-        self.assertTrue(correo.identidad(c))
+        self.assertEqual(correo.identidad(c),
+                         "sha:" + __import__("hashlib").sha256(
+                             "a@b.com|Hola|Tue, 5 Aug 2026 11:00:00 -0300"
+                             .encode()).hexdigest()[:32])
 
 
 if __name__ == "__main__":
@@ -245,7 +259,7 @@ from correo import (TIPOS_ADJUNTO, MESES_IMAP, abrir_buzon, adjuntos,  # noqa: F
 - [ ] **Step 6: Correr los tests y verificar que las herramientas siguen vivas**
 
 Run: `python3 -m unittest discover tests -v`
-Expected: PASS, 9 tests
+Expected: PASS, 10 tests
 
 Run: `python3 -c "import simulacro, explorar, revisar_reglas, archivar_ruido; print('las cuatro herramientas importan bien')"`
 Expected: imprime el mensaje, sin excepción
