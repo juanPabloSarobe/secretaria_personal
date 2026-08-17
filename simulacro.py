@@ -16,6 +16,8 @@ from collections import Counter
 import urllib.error, urllib.parse, urllib.request
 from datetime import datetime, timezone
 
+from bot import (CATEGORIAS, UA, es_de_esta_tanda, teclado,  # noqa: F401
+                 teclado_direcciones, tg, tg_suave, transcribir)
 from correo import (TIPOS_ADJUNTO, MESES_IMAP, abrir_buzon, adjuntos,  # noqa: F401
                     adjuntos_legibles, completar_adjuntos, identidad,
                     texto_plano, traer_correos)
@@ -57,99 +59,12 @@ CANTIDAD, MOTOR, DESDE, LISTA = (parsear_argumentos(sys.argv[1:])
 # correo—. El número de pregunta no alcanza para distinguirlos porque toda
 # tanda empieza en 1. Con el token, los botones viejos se rechazan solos.
 TANDA = f"{os.getpid() % 10000:04d}"
-UA = {"User-Agent": "secretaria-personal/0.1"}  # sin esto, Cloudflare devuelve 403/1010
-
-CATEGORIAS = {
-    "RUIDO":    "🗑 Ruido",
-    "DELEGADO": "✅ Ya está en copia",
-    "ENZO":     "➡️ Derivar a Enzo",
-    "NATALIA":  "➡️ Derivar a Natalia",
-    "TUYO":     "🔴 Es mío",
-    "DUDA":     "❓ No sé",
-}
 
 
-# ------------------------------------------------------------------ Telegram
-def tg(metodo, _intentos=5, **params):
-    """Llamada a Telegram, tolerante a tropiezos de red.
-
-    Esperar a que JP conteste significa mantener conexiones abiertas durante
-    horas: una tanda quedó 84 minutos esperando el primer botón. En ese lapso
-    un corte momentáneo es inevitable, y sin reintento mata la sesión entera
-    junto con todo lo que se hubiera avanzado.
-
-    Un long-poll que vence es lo normal, no un error: se vuelve a pedir.
-    """
-    url = f"https://api.telegram.org/bot{os.environ['TELEGRAM_BOT_TOKEN']}/{metodo}"
-    data = urllib.parse.urlencode(
-        {k: (json.dumps(v) if isinstance(v, (dict, list)) else v)
-         for k, v in params.items()}).encode()
-
-    for intento in range(_intentos):
-        req = urllib.request.Request(url, data=data, headers=UA)
-        try:
-            with urllib.request.urlopen(req, timeout=70) as r:
-                return json.load(r)
-
-        except urllib.error.HTTPError as e:
-            detalle = e.read().decode(errors="replace")[:200]
-            if e.code < 500 and e.code != 429:
-                # un 4xx no se arregla repitiéndolo; el cuerpo dice qué pasó
-                raise RuntimeError(f"Telegram {metodo} -> {e.code}: {detalle}") from None
-            if intento == _intentos - 1:
-                raise RuntimeError(f"Telegram {metodo} -> {e.code}: {detalle}") from None
-            print(f"      (Telegram {e.code}, reintento {intento + 1})", flush=True)
-            time.sleep(min(2 ** intento, 15))
-
-        except (TimeoutError, urllib.error.URLError, OSError,
-                json.JSONDecodeError) as e:
-            if intento == _intentos - 1:
-                raise RuntimeError(
-                    f"Telegram {metodo}: red caída tras {_intentos} intentos "
-                    f"({type(e).__name__}: {e})") from None
-            # el long-poll que vence es rutina; no vale la pena llenar el log
-            if metodo != "getUpdates":
-                print(f"      (red: {type(e).__name__}, reintento {intento + 1})",
-                      flush=True)
-            time.sleep(min(2 ** intento, 15))
-
-
-def tg_suave(metodo, **params):
-    """Llamada cosmética: si falla, se sigue igual.
-
-    answerCallbackQuery solo apaga el relojito del botón, y Telegram lo rechaza
-    con 400 si la consulta ya expiró — cosa que pasa cuando JP se toma su tiempo
-    para contestar. Que no se pueda apagar un reloj no puede costar una sesión
-    entera de trabajo manual.
-    """
-    try:
-        return tg(metodo, **params)
-    except Exception as e:
-        print(f"      (aviso: {e})", flush=True)
-        return None
-
-
-def teclado(idx):
-    orden = ["RUIDO", "DELEGADO", "ENZO", "NATALIA", "TUYO", "DUDA"]
-    filas, fila = [], []
-    for cat in orden:
-        fila.append({"text": CATEGORIAS[cat], "callback_data": f"c|{TANDA}-{idx}|{cat}"})
-        if len(fila) == 2:
-            filas.append(fila); fila = []
-    if fila:
-        filas.append(fila)
-    filas.append([{"text": "⭐ Cliente importante", "callback_data": f"i|{TANDA}-{idx}|0"}])
-    return {"inline_keyboard": filas}
-
-
-def teclado_direcciones(idx, direcciones):
-    """Lista de direcciones del correo, para marcar cuál es el cliente importante."""
-    filas = [[{"text": f"⭐ {etiqueta}"[:60], "callback_data": f"d|{TANDA}-{idx}|{n}"}]
-             for n, (etiqueta, _) in enumerate(direcciones)]
-    filas.append([{"text": "← volver", "callback_data": f"v|{TANDA}-{idx}|0"}])
-    return {"inline_keyboard": filas}
-
-
+# ------------------------------------------------------------------ Bucle interactivo
+# esperar_respuesta y pedir_explicacion no viven en bot.py: son el bucle de
+# preguntas del simulacro, y la secretaria no los usa porque escucha de otra
+# manera. Lo que hablan con Telegram directamente sí se movió (bot.tg, etc).
 def esperar_respuesta(idx, offset, msg_id, texto, direcciones):
     """Long-polling hasta que JP elija una categoría.
 
@@ -164,11 +79,11 @@ def esperar_respuesta(idx, offset, msg_id, texto, direcciones):
             cq = u.get("callback_query")
             if not cq:
                 continue
-            partes = cq["data"].split("|")
-            if len(partes) != 3 or partes[1] != f"{TANDA}-{idx}":
+            if not es_de_esta_tanda(cq["data"], idx, TANDA):
                 tg_suave("answerCallbackQuery", callback_query_id=cq["id"],
                    text="Ese botón es de otro correo, ya pasó.")
                 continue
+            partes = cq["data"].split("|")
             accion, valor = partes[0], partes[2]
 
             if accion == "c":                                   # categoría: termina
@@ -185,7 +100,7 @@ def esperar_respuesta(idx, offset, msg_id, texto, direcciones):
                    message_id=msg_id, parse_mode="HTML",
                    text=texto.replace("¿Qué correspondía?",
                                       "¿Cuál de estos es el cliente importante?"),
-                   reply_markup=teclado_direcciones(idx, direcciones))
+                   reply_markup=teclado_direcciones(idx, direcciones, TANDA))
 
             elif accion == "d":                                 # elegir dirección
                 etiqueta, direccion = direcciones[int(valor)]
@@ -198,55 +113,16 @@ def esperar_respuesta(idx, offset, msg_id, texto, direcciones):
                    text=texto.replace("¿Qué correspondía?",
                                       f"⭐ {html.escape(direccion)} marcado como importante.\n\n"
                                       "¿Qué correspondía?"),
-                   reply_markup=teclado(idx))
+                   reply_markup=teclado(idx, TANDA))
 
             elif accion == "v":                                 # volver sin marcar
                 tg_suave("answerCallbackQuery", callback_query_id=cq["id"])
                 tg_suave("editMessageText", chat_id=os.environ["TELEGRAM_CHAT_ID"],
                    message_id=msg_id, parse_mode="HTML", text=texto,
-                   reply_markup=teclado(idx))
+                   reply_markup=teclado(idx, TANDA))
 
 
 # ------------------------------------------------------------------ Explicaciones
-def transcribir(file_id):
-    """Baja un audio de Telegram y lo transcribe con Whisper en Groq.
-
-    Cada paso se anuncia y tiene su propio tope de tiempo: una vez esto se
-    colgó en silencio durante minutos y desde afuera no había forma de saber
-    si estaba bajando, transcribiendo o muerto.
-    """
-    print("      [audio] pidiendo la ubicación del archivo…", flush=True)
-    d = tg("getFile", file_id=file_id)
-    ruta = d["result"]["file_path"]
-
-    print("      [audio] descargando…", flush=True)
-    url = f"https://api.telegram.org/file/bot{os.environ['TELEGRAM_BOT_TOKEN']}/{ruta}"
-    with urllib.request.urlopen(urllib.request.Request(url, headers=UA), timeout=30) as r:
-        audio = r.read()
-    print(f"      [audio] {len(audio)} bytes, transcribiendo…", flush=True)
-
-    # multipart armado a mano: urllib no trae ayuda para esto
-    borde = "----secretaria" + str(len(audio))
-    partes = []
-    for campo, valor in (("model", "whisper-large-v3-turbo"),
-                         ("response_format", "json"), ("language", "es")):
-        partes.append(f"--{borde}\r\nContent-Disposition: form-data; name=\"{campo}\"\r\n"
-                      f"\r\n{valor}\r\n".encode())
-    partes.append(f"--{borde}\r\nContent-Disposition: form-data; name=\"file\"; "
-                  f"filename=\"nota.ogg\"\r\nContent-Type: audio/ogg\r\n\r\n".encode())
-    partes.append(audio)
-    partes.append(f"\r\n--{borde}--\r\n".encode())
-
-    req = urllib.request.Request(
-        os.environ["GROQ_BASE_URL"] + "/audio/transcriptions", data=b"".join(partes),
-        headers={**UA, "Authorization": "Bearer " + os.environ["GROQ_API_KEY"],
-                 "Content-Type": f"multipart/form-data; boundary={borde}"})
-    with urllib.request.urlopen(req, timeout=60) as r:
-        texto = json.load(r).get("text", "").strip()
-    print(f"      [audio] listo: {texto[:60]!r}", flush=True)
-    return texto
-
-
 def pedir_explicacion(idx, offset, esperado, dicho):
     """Cuando diferimos, pregunta el porqué. Acepta texto o audio.
 
@@ -942,7 +818,7 @@ def main():
                  f"{html.escape(adjuntos_legibles(c.get('adjuntos')))}\n\n"
                  f"<pre>{html.escape(cuerpo)}</pre>\n\n¿Qué correspondía?")
         m = tg("sendMessage", chat_id=chat, text=texto, parse_mode="HTML",
-               reply_markup=teclado(idx))
+               reply_markup=teclado(idx, TANDA))
         msg_id = m["result"]["message_id"]
 
         t_espera = time.time()
