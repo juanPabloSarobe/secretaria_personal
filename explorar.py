@@ -23,8 +23,8 @@ from collections import Counter
 from datetime import date, datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from simulacro import (clasificar_una_vez, identidad, ids_respondidos,  # noqa: E402
-                       prompt_sistema, traer_correos)
+from clasificador import clasificar_una_vez, prompt_sistema  # noqa: E402
+from simulacro import identidad, ids_respondidos, traer_correos  # noqa: E402
 
 _args = sys.argv[1:]
 MOTOR = "ollama"

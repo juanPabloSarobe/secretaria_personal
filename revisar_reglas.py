@@ -21,7 +21,7 @@ from collections import Counter
 import os.path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from simulacro import clasificar_una_vez, motores, prompt_sistema  # noqa: E402
+from clasificador import clasificar_una_vez, motores, prompt_sistema  # noqa: E402
 
 _args = sys.argv[1:]
 MOTOR = None

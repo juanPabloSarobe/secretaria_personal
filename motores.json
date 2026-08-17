@@ -1,0 +1,23 @@
+{
+  "preferencia": ["nvidia", "groq"],
+  "catalogo": {
+    "nvidia": {
+      "url": "NVIDIA_BASE_URL",
+      "clave": "NVIDIA_API_KEY",
+      "modelo": "nvidia/nemotron-3-super-120b-a12b"
+    },
+    "groq": {
+      "url": "GROQ_BASE_URL",
+      "clave": "GROQ_API_KEY",
+      "modelo": "llama-3.3-70b-versatile"
+    }
+  },
+  "fuera": {
+    "ollama": {
+      "url": "OLLAMA_BASE_URL",
+      "clave": "OLLAMA_API_KEY",
+      "modelo": "qwen2.5:14b",
+      "motivo": "Sacado el 2026-08-12 a pedido de JP: la Mac no puede tener dos modelos cargados y lo necesita para otro proyecto. Se vuelve a habilitar moviendo esta entrada a catalogo."
+    }
+  }
+}
