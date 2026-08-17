@@ -3,10 +3,15 @@
 El conocimiento: roster del equipo, reglas aprendidas, códigos convenidos y
 ruido conocido.
 
-Este es el único módulo que sabe en qué archivo vive cada cosa (roster.md,
-reglas.md, codigos.md, datos/simulacro-*.json). El resto del sistema —el
-clasificador, el bot— le pide texto_de_conocimiento() o protegido() y no
-abre un archivo por su cuenta.
+Este es el único módulo que sabe en qué archivo vive el roster, las reglas y
+los códigos convenidos (roster.md, reglas.md, codigos.md): el clasificador le
+pide texto_de_conocimiento() o protegido() y no abre esos tres por su cuenta.
+
+Ojo, esto NO cubre datos/simulacro-*.json: ese es el historial de tandas, y
+simulacro.py y archivar_ruido.py también lo leen directo, cada uno para lo
+suyo (saber qué ya se respondió, decidir qué archivar). remitentes_ruido()
+de acá abajo lo lee también, pero para derivar el ruido conocido — es una
+lectura más entre varias, no una que este módulo tenga en exclusiva.
 """
 import email.utils
 import glob

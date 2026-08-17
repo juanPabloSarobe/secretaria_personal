@@ -23,19 +23,67 @@ class Codigos(unittest.TestCase):
         self.assertIsNone(reglas.tiene_codigo(c, ["tal cual lo charlado"]))
 
 
-class Protegido(unittest.TestCase):
-    def test_mira_el_roster_y_tambien_las_reglas(self):
+class ProtegidoLogica(unittest.TestCase):
+    """El comportamiento de protegido(): OR entre roster.md y reglas.md. Esto
+    es lo que se rompió una vez —cuando protegido() solo miraba el roster— y
+    lo que hay que fijar con certeza. Usa archivos temporales con contenido
+    inventado, así el resultado no depende de una palabra en particular
+    dentro de roster.md/reglas.md reales, que JP edita a mano y reorganiza
+    sin avisar."""
+
+    def setUp(self):
+        # protegido() abre "roster.md" y "reglas.md" por nombre relativo, sin
+        # recibir la ruta como parámetro — para aislarlo hay que pararse en
+        # un directorio con esos dos archivos, y volver al original después.
+        dir_original = os.getcwd()
+        tmp = tempfile.TemporaryDirectory()
+        os.chdir(tmp.name)
+        self.addCleanup(os.chdir, dir_original)
+        self.addCleanup(tmp.cleanup)
+
+    def _escribir_archivos(self, roster="", reglas_texto=""):
+        with open("roster.md", "w", encoding="utf-8") as f:
+            f.write(roster)
+        with open("reglas.md", "w", encoding="utf-8") as f:
+            f.write(reglas_texto)
+
+    def test_protegido_si_el_remitente_esta_solo_en_el_roster(self):
+        self._escribir_archivos(roster="cliente@ejemplo.com", reglas_texto="sin relación")
+        self.assertTrue(reglas.protegido({"de": "x <cliente@ejemplo.com>"}))
+
+    def test_protegido_si_el_remitente_esta_solo_en_las_reglas(self):
+        self._escribir_archivos(roster="sin relación", reglas_texto="cliente@ejemplo.com")
+        self.assertTrue(reglas.protegido({"de": "x <cliente@ejemplo.com>"}))
+
+    def test_no_protegido_si_no_esta_en_ninguno(self):
+        self._escribir_archivos(roster="sin relación", reglas_texto="tampoco")
+        self.assertFalse(reglas.protegido({"de": "x <cliente@ejemplo.com>"}))
+
+
+class ProtegidoCanario(unittest.TestCase):
+    """A diferencia de ProtegidoLogica, esto SÍ corre contra roster.md y
+    reglas.md reales. No fija el comportamiento de protegido() —eso ya lo
+    hace ProtegidoLogica con datos sintéticos— sino que dos remitentes
+    concretos, sobre los que JP ya se pronunció por escrito, siguen
+    protegidos hoy. Un rojo acá no es necesariamente un bug de protegido():
+    puede ser que esos remitentes se hayan sacado de los archivos."""
+
+    def test_los_remitentes_marcados_hoy_siguen_protegidos(self):
         """Sobre lo que JP ya se pronunció, el sistema no decide solo. Una
         vez el filtro automático archivó una promo de SiPago que tenía una
         regla escrita, porque protegido() solo miraba roster.md."""
         self.assertTrue(reglas.protegido({"de": "x <cobros@sipago.com.ar>"}),
-                         msg="si esto falla, puede ser que sipago.com.ar ya no "
-                             "figure en roster.md/reglas.md (edición manual de "
-                             "JP), no necesariamente que protegido() esté rota")
+                         msg="si esto falla, lo más probable es que "
+                             "sipago.com.ar ya no figure en roster.md/reglas.md "
+                             "(JP los edita a mano) y no que protegido() esté "
+                             "rota — la lógica de protegido() la cubre "
+                             "ProtegidoLogica con datos inventados")
         self.assertTrue(reglas.protegido({"de": "x <algo@imseg.com>"}),
-                         msg="si esto falla, puede ser que imseg.com ya no "
-                             "figure en roster.md/reglas.md (edición manual de "
-                             "JP), no necesariamente que protegido() esté rota")
+                         msg="si esto falla, lo más probable es que imseg.com "
+                             "ya no figure en roster.md/reglas.md (JP los "
+                             "edita a mano) y no que protegido() esté rota — "
+                             "la lógica de protegido() la cubre ProtegidoLogica "
+                             "con datos inventados")
 
     def test_un_remitente_desconocido_no_esta_protegido(self):
         self.assertFalse(reglas.protegido({"de": "x <nadie@ejemplo-raro.com>"}))
