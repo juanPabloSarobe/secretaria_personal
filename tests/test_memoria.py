@@ -1,5 +1,6 @@
 import os
 import tempfile
+import threading
 import unittest
 
 import memoria
@@ -42,6 +43,51 @@ class Anotar(unittest.TestCase):
         memoria.cambiar(self.cx, "<1@x>", "archivado")
         p = memoria.pendientes(self.cx, "archivado")
         self.assertEqual([c["asunto"] for c in p], ["uno"])
+
+
+class Concurrencia(unittest.TestCase):
+    """El hilo que escucha a JP por Telegram y el que procesa correo tocan
+    la misma conexión a la vez. Sin coordinación esto disparaba
+    sqlite3.InterfaceError e IntegrityError, y perdía filas en silencio
+    (398 de 400 esperadas en la corrida que encontró el problema). Si
+    alguien saca el candado de memoria.py, este test tiene que volver a
+    fallar."""
+
+    def setUp(self):
+        self.f = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.cx = memoria.abrir(self.f.name)
+
+    def tearDown(self):
+        self.cx.close()
+        os.unlink(self.f.name)
+
+    def test_dos_hilos_anotando_y_cambiando_en_paralelo_no_rompen_la_base(self):
+        n = 150
+        errores = []
+
+        def trabajador(prefijo):
+            for i in range(n):
+                mid = f"<{prefijo}-{i}@x.com>"
+                try:
+                    memoria.anotar(self.cx, un_correo(mid, f"{prefijo}-{i}"),
+                                    "RUIDO", "m")
+                    memoria.cambiar(self.cx, mid, "archivado")
+                    if memoria.situacion(self.cx, mid) != "archivado":
+                        errores.append(f"{mid}: quedó a medias")
+                except Exception as e:
+                    errores.append(f"{mid}: {type(e).__name__}: {e}")
+
+        hilos = [threading.Thread(target=trabajador, args=(prefijo,))
+                 for prefijo in ("A", "B")]
+        for h in hilos:
+            h.start()
+        for h in hilos:
+            h.join()
+
+        self.assertEqual(errores, [])
+        total = self.cx.execute(
+            "SELECT COUNT(*) AS n FROM correos").fetchone()["n"]
+        self.assertEqual(total, 2 * n)
 
 
 class Correcciones(unittest.TestCase):
