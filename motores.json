@@ -1,5 +1,8 @@
 {
-  "preferencia": ["nvidia", "groq"],
+  "preferencia": [
+    "nvidia",
+    "groq"
+  ],
   "catalogo": {
     "nvidia": {
       "url": "NVIDIA_BASE_URL",
@@ -9,7 +12,8 @@
     "groq": {
       "url": "GROQ_BASE_URL",
       "clave": "GROQ_API_KEY",
-      "modelo": "llama-3.3-70b-versatile"
+      "modelo": "qwen/qwen3.6-27b",
+      "nota": "2026-08-19: llama-3.3-70b-versatile fue dado de baja por groq y devolvía 404 sin que se notara, porque nvidia contestaba y el fallo parecía cuota agotada. El modelo nuevo tampoco sirve hoy: el nivel gratuito rechaza el prompt entero con HTTP 413 (unos 6.000 tokens de roster + reglas). O sea que HOY NO HAY RESPALDO REAL. Se arregla achicando el prompt, habilitando ollama, o pagando el nivel de groq."
     }
   },
   "fuera": {
