@@ -147,6 +147,38 @@ class Secretaria:
         """
         return not EN_SECO and not self.pausada
 
+    def _archivar(self, c):
+        """Intenta mover un correo a Ruido y deja la base consistente con
+        lo que de verdad pasó en la casilla.
+
+        Nunca marca "archivado" sin que mover_a haya confirmado el
+        borrado del original -eso dejaría a la base diciendo algo que la
+        casilla desmiente. Y una falla -de red, o correo.OperacionAMedias
+        cuando el COPY se confirmó pero el borrado quedó a medias- no
+        puede hacer que el correo se pierda de vista para siempre: queda
+        en "pendiente_de_archivar", que revisar_casilla reintenta en el
+        próximo ciclo sin volver a consultar al modelo, porque ya está
+        clasificado. Antes, una excepción acá se escapaba hasta
+        ciclo_de_correo, que la atajaba y seguía -pero memoria.anotar()
+        ya había corrido, así que el chequeo de "¿ya lo vi?" lo saltaba
+        para siempre en la vuelta siguiente: quedaba en la bandeja de JP,
+        sin archivar y sin que nadie lo reintentara.
+        """
+        if not self.puede_escribir():
+            return
+        try:
+            if correo.mover_a(c["message_id"], "INBOX.Ruido"):
+                memoria.cambiar(self.cx, c["message_id"], "archivado")
+            else:
+                # No estaba en INBOX -alguien ya lo movió o lo borró a
+                # mano-: no hay nada que reintentar. Vuelve a
+                # "clasificado" si venía de un reintento, para no quedar
+                # dando vueltas en pendiente_de_archivar para siempre.
+                memoria.cambiar(self.cx, c["message_id"], "clasificado")
+        except Exception as e:
+            _registrar("archivar", e)
+            memoria.cambiar(self.cx, c["message_id"], "pendiente_de_archivar")
+
     def revisar_casilla(self):
         """Trae lo nuevo, lo clasifica, archiva el ruido y avisa lo de JP.
 
@@ -162,11 +194,27 @@ class Secretaria:
         frases = reglas.codigos_convenidos()
         nuevos = 0
         for c in entrantes:
-            if memoria.situacion(self.cx, correo.identidad(c)) is not None:
-                # Ya procesado: si el proceso se cayó y volvió, no hay que
-                # avisarle a JP dos veces por el mismo correo.
+            identidad = correo.identidad(c)
+            situacion_previa = memoria.situacion(self.cx, identidad)
+
+            if situacion_previa == "pendiente_de_archivar":
+                # Ya se decidió RUIDO en un ciclo anterior; lo único que
+                # falló fue la escritura (red caída, o un COPY confirmado
+                # con el borrado a medias). Se reintenta sólo esa parte,
+                # sin volver a consultar al modelo -no hay nada nuevo que
+                # decidir- y sin contarlo en `nuevos`, porque no es un
+                # correo nuevo.
+                c["message_id"] = identidad
+                self._archivar(c)
                 continue
-            c["message_id"] = correo.identidad(c)
+
+            if situacion_previa is not None:
+                # Ya procesado y resuelto: si el proceso se cayó y
+                # volvió, no hay que avisarle a JP dos veces por el mismo
+                # correo.
+                continue
+
+            c["message_id"] = identidad
             nuevos += 1
 
             # Un código convenido gana sobre todo, igual que en
@@ -202,8 +250,7 @@ class Secretaria:
                            else reglas.es_ruido_conocido(c, direcciones, dominios))
             if motivo_auto and random.randrange(reglas.MUESTREO_CONTROL):
                 memoria.anotar(self.cx, c, "RUIDO", f"ruido conocido — {motivo_auto}")
-                if self.puede_escribir() and correo.mover_a(c["message_id"], "INBOX.Ruido"):
-                    memoria.cambiar(self.cx, c["message_id"], "archivado")
+                self._archivar(c)
                 continue
 
             try:
@@ -223,8 +270,7 @@ class Secretaria:
                 self.avisar_para_que_decida(c)
             elif (pred["categoria"] == "RUIDO" and pred.get("unanime")
                     and not reglas.protegido(c)):
-                if self.puede_escribir() and correo.mover_a(c["message_id"], "INBOX.Ruido"):
-                    memoria.cambiar(self.cx, c["message_id"], "archivado")
+                self._archivar(c)
             elif pred["categoria"] in ("TUYO", "ENZO", "NATALIA"):
                 if not c.get("ya_leido"):
                     self.avisar_en_el_momento(c, pred)

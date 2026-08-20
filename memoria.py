@@ -22,7 +22,8 @@ import sqlite3
 import threading
 
 SITUACIONES = {"clasificado", "archivado", "en_resumen", "avisado",
-               "cerrado", "corregido", "mostrado_sin_clasificar"}
+               "cerrado", "corregido", "mostrado_sin_clasificar",
+               "pendiente_de_archivar"}
 
 # RLock y no Lock: alguna función de acá podría terminar llamando a otra
 # de acá (p.ej. anotar() llamaba a situacion()), y con un Lock simple eso

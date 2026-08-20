@@ -531,5 +531,116 @@ class CodigoConvenido(unittest.TestCase):
 
 
 
+class Reintento(unittest.TestCase):
+    """Importante 2 de la ronda 3: si mover_a revienta, el correo no
+    puede quedar invisible para siempre. memoria.anotar() ya corrió antes
+    del intento de archivar, así que sin este resguardo el chequeo de
+    "¿ya lo vi?" de la vuelta siguiente lo saltea para siempre -- se
+    queda en la bandeja de JP, sin archivar y sin que nadie lo
+    reintente."""
+
+    def setUp(self):
+        self.f = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.s = secretaria.Secretaria(cx=memoria.abrir(self.f.name))
+
+    def test_un_mover_a_que_revienta_deja_pendiente_de_archivar(self):
+        c = correo_falso("<12@x>", "Promo")
+        with mock.patch.object(secretaria, "EN_SECO", False), \
+             mock.patch.object(secretaria.correo, "traer_nuevos",
+                               return_value=[c]), \
+             mock.patch.object(secretaria.clasificador, "clasificar",
+                               return_value={"categoria": "RUIDO",
+                                             "motivo": "promo",
+                                             "unanime": True}), \
+             mock.patch.object(secretaria.correo, "mover_a",
+                               side_effect=RuntimeError("red caída")):
+            self.s.revisar_casilla()
+        self.assertEqual(memoria.situacion(self.s.cx, "<12@x>"),
+                         "pendiente_de_archivar")
+
+    def test_una_operacion_a_medias_tambien_deja_pendiente_de_archivar(self):
+        """correo.OperacionAMedias es una excepción más para este
+        propósito: tampoco puede confirmarse como archivado, así que
+        también deja el correo pendiente de reintento."""
+        c = correo_falso("<13@x>", "Promo")
+        with mock.patch.object(secretaria, "EN_SECO", False), \
+             mock.patch.object(secretaria.correo, "traer_nuevos",
+                               return_value=[c]), \
+             mock.patch.object(secretaria.clasificador, "clasificar",
+                               return_value={"categoria": "RUIDO",
+                                             "motivo": "promo",
+                                             "unanime": True}), \
+             mock.patch.object(
+                 secretaria.correo, "mover_a",
+                 side_effect=secretaria.correo.OperacionAMedias("a medias")):
+            self.s.revisar_casilla()
+        self.assertEqual(memoria.situacion(self.s.cx, "<13@x>"),
+                         "pendiente_de_archivar")
+
+    def test_el_ciclo_siguiente_reintenta_sin_volver_a_clasificar(self):
+        c = correo_falso("<14@x>", "Promo")
+        with mock.patch.object(secretaria, "EN_SECO", False), \
+             mock.patch.object(secretaria.correo, "traer_nuevos",
+                               return_value=[c]), \
+             mock.patch.object(secretaria.clasificador, "clasificar",
+                               return_value={"categoria": "RUIDO",
+                                             "motivo": "promo",
+                                             "unanime": True}) as cl, \
+             mock.patch.object(
+                 secretaria.correo, "mover_a",
+                 side_effect=[RuntimeError("red caída"), True]) as mover:
+            self.s.revisar_casilla()
+            self.assertEqual(memoria.situacion(self.s.cx, "<14@x>"),
+                             "pendiente_de_archivar")
+            nuevos_segundo_ciclo = self.s.revisar_casilla()
+        self.assertEqual(mover.call_count, 2)
+        cl.assert_called_once()
+        self.assertEqual(memoria.situacion(self.s.cx, "<14@x>"), "archivado")
+        self.assertEqual(nuevos_segundo_ciclo, 0)
+
+    def test_si_el_freno_esta_puesto_el_reintento_no_llama_a_mover_a(self):
+        c = correo_falso("<15@x>", "Promo")
+        with mock.patch.object(secretaria, "EN_SECO", False), \
+             mock.patch.object(secretaria.correo, "traer_nuevos",
+                               return_value=[c]), \
+             mock.patch.object(secretaria.clasificador, "clasificar",
+                               return_value={"categoria": "RUIDO",
+                                             "motivo": "promo",
+                                             "unanime": True}), \
+             mock.patch.object(secretaria.correo, "mover_a",
+                               side_effect=RuntimeError("red caída")):
+            self.s.revisar_casilla()
+        with mock.patch.object(secretaria, "EN_SECO", True), \
+             mock.patch.object(secretaria.correo, "traer_nuevos",
+                               return_value=[c]), \
+             mock.patch.object(secretaria.correo, "mover_a") as mover:
+            self.s.revisar_casilla()
+        mover.assert_not_called()
+        self.assertEqual(memoria.situacion(self.s.cx, "<15@x>"),
+                         "pendiente_de_archivar")
+
+    def test_si_ya_no_esta_mas_en_inbox_deja_de_reintentar(self):
+        """Un mover_a que ya no encuentra el correo (alguien lo movió o
+        lo borró a mano) no es un fallo para reintentar: no hay nada que
+        reintentar, así que vuelve a "clasificado" en vez de quedar dando
+        vueltas en pendiente_de_archivar para siempre."""
+        c = correo_falso("<16@x>", "Promo")
+        with mock.patch.object(secretaria, "EN_SECO", False), \
+             mock.patch.object(secretaria.correo, "traer_nuevos",
+                               return_value=[c]), \
+             mock.patch.object(secretaria.clasificador, "clasificar",
+                               return_value={"categoria": "RUIDO",
+                                             "motivo": "promo",
+                                             "unanime": True}), \
+             mock.patch.object(
+                 secretaria.correo, "mover_a",
+                 side_effect=[RuntimeError("red caída"), False]):
+            self.s.revisar_casilla()
+            self.s.revisar_casilla()
+        self.assertEqual(memoria.situacion(self.s.cx, "<16@x>"),
+                         "clasificado")
+
+
+
 if __name__ == "__main__":
     unittest.main()

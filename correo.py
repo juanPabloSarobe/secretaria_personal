@@ -10,6 +10,19 @@ import email, email.policy, email.utils, hashlib, html, imaplib, os, re
 from datetime import datetime, timezone
 
 
+class OperacionAMedias(Exception):
+    """El COPY se confirmó, pero el paso que borra el original no.
+
+    El mensaje quedó duplicado -una copia ya en el destino, otra todavía
+    en el origen sin borrar- y desde acá no hay forma de saber si
+    conviene reintentar el borrado, dejarlo así, o algo distinto: quien
+    llama decide. Por eso esto se levanta como excepción en vez de
+    devolver un booleano: ni `True` sirve (mentiría: la operación no
+    terminó como se pidió) ni `False` (también mentiría: sí se copió
+    algo, no es que no haya pasado nada).
+    """
+
+
 def abrir_buzon(readonly=True):
     """Una conexión a la casilla, ya autenticada y con INBOX seleccionado.
 
@@ -215,12 +228,17 @@ def mover_a(message_id, carpeta):
     COPY + UID EXPUNGE porque el servidor no tiene MOVE pero sí UIDPLUS.
     Nunca EXPUNGE a secas: eso borraría otros mensajes marcados.
 
-    El `typ` del COPY se chequea a propósito: `imaplib` sólo levanta
-    excepción si el servidor contesta BAD. Una respuesta NO -carpeta que
-    no existe, cuota superada, un error transitorio- vuelve en silencio,
-    y sin este chequeo el código seguía igual con STORE +Deleted y
-    EXPUNGE: el primer COPY que el servidor rechazara borraba un correo
-    de JP sin haberlo copiado a ningún lado, de forma irreversible.
+    El `typ` de LOS TRES comandos se chequea a propósito, no sólo el del
+    COPY: `imaplib` sólo levanta excepción si el servidor contesta BAD.
+    Una respuesta NO -carpeta que no existe, cuota superada, un error
+    transitorio- vuelve en silencio. Sin chequear el COPY, un NO ahí
+    borraba un correo sin haberlo copiado a ningún lado (eso ya se
+    arregló). Pero un NO en el STORE o el EXPUNGE, DESPUÉS de un COPY que
+    sí salió bien, es otro problema: acá ya existe una copia nueva en
+    `carpeta`, así que ni devolver True (mentiría: no terminó como se
+    pidió) ni False (también mentiría: sí se copió algo) describe lo que
+    pasó. Ese caso levanta OperacionAMedias en vez de devolver nada,
+    para que quien llama no pueda tratarlo como éxito por accidente.
     """
     M = abrir_buzon(readonly=False)
     try:
@@ -229,9 +247,20 @@ def mover_a(message_id, carpeta):
             return False
         typ, _ = M.uid("COPY", uid, carpeta)
         if typ != "OK":
+            # Nada se copió: no hay nada que deshacer, es seguro
+            # reintentar desde cero más adelante.
             return False
-        M.uid("STORE", uid, "+FLAGS", "(\\Deleted)")
-        M.uid("EXPUNGE", uid)
+        typ, _ = M.uid("STORE", uid, "+FLAGS", "(\\Deleted)")
+        if typ != "OK":
+            raise OperacionAMedias(
+                f"{message_id}: se copió a {carpeta} pero no se pudo"
+                " marcar para borrar en INBOX -- quedó duplicado")
+        typ, _ = M.uid("EXPUNGE", uid)
+        if typ != "OK":
+            raise OperacionAMedias(
+                f"{message_id}: se copió a {carpeta} y se marcó para"
+                " borrar, pero el EXPUNGE no se confirmó -- puede haber"
+                " quedado duplicado en INBOX")
         return True
     finally:
         M.logout()
@@ -244,8 +273,8 @@ def marcar_leido(message_id):
         uid = _uid_de(M, message_id)
         if not uid:
             return False
-        M.uid("STORE", uid, "+FLAGS", "(\\Seen)")
-        return True
+        typ, _ = M.uid("STORE", uid, "+FLAGS", "(\\Seen)")
+        return typ == "OK"
     finally:
         M.logout()
 
@@ -263,12 +292,17 @@ def devolver_a_bandeja(message_id):
     de que hacía falta corregirla (la versión anterior tenía justo ese
     problema). Y el borrado de Ruido queda como último paso: si el
     proceso se corta en cualquier punto anterior, el mensaje sigue
-    existiendo en Ruido y una reintento repite la operación desde el
+    existiendo en Ruido y un reintento repite la operación desde el
     principio -en el peor caso deja un duplicado sin leer en INBOX y el
     original todavía en Ruido, nunca un correo perdido o mal marcado.
 
-    El COPY se chequea igual que en mover_a: un NO sin excepción no puede
-    hacer que sigamos de largo borrando el original de Ruido.
+    Los CUATRO comandos de escritura se chequean, no sólo el COPY: los
+    dos primeros (STORE -Seen, COPY) todavía no cambiaron nada del lado
+    de Ruido si fallan, así que un NO ahí es simplemente False, seguro
+    de reintentar desde cero. Los dos últimos (STORE +Deleted, EXPUNGE)
+    corren DESPUÉS de que el COPY ya confirmó una copia nueva en INBOX:
+    un NO en cualquiera de esos dos deja un duplicado -mismo caso que en
+    mover_a- y levanta OperacionAMedias en vez de mentir con un booleano.
     """
     M = imaplib.IMAP4_SSL(os.environ["IMAP_HOST"],
                           int(os.environ["IMAP_PORT"]), timeout=40)
@@ -278,12 +312,24 @@ def devolver_a_bandeja(message_id):
         uid = _uid_de(M, message_id)
         if not uid:
             return False
-        M.uid("STORE", uid, "-FLAGS", "(\\Seen)")
+        typ, _ = M.uid("STORE", uid, "-FLAGS", "(\\Seen)")
+        if typ != "OK":
+            # Todavía no se copió nada: seguro reintentar desde cero.
+            return False
         typ, _ = M.uid("COPY", uid, "INBOX")
         if typ != "OK":
             return False
-        M.uid("STORE", uid, "+FLAGS", "(\\Deleted)")
-        M.uid("EXPUNGE", uid)
+        typ, _ = M.uid("STORE", uid, "+FLAGS", "(\\Deleted)")
+        if typ != "OK":
+            raise OperacionAMedias(
+                f"{message_id}: se copió a INBOX (ya sin \\Seen) pero no"
+                " se pudo marcar para borrar en Ruido -- quedó duplicado")
+        typ, _ = M.uid("EXPUNGE", uid)
+        if typ != "OK":
+            raise OperacionAMedias(
+                f"{message_id}: se copió a INBOX y se marcó para borrar"
+                " en Ruido, pero el EXPUNGE no se confirmó -- puede"
+                " haber quedado duplicado")
         return True
     finally:
         M.logout()

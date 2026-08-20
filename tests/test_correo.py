@@ -22,14 +22,37 @@ class _IMAPFalso:
     `copy_ok=False` simula justo eso: un COPY que el servidor rechaza con
     NO -imaplib únicamente levanta excepción ante un BAD, un NO vuelve en
     silencio- para confirmar que el código de acá no sigue de largo como
-    si hubiera funcionado.
+    si hubiera funcionado. `store_ok` y `expunge_ok` hacen lo mismo para
+    esos dos comandos -el hermano del mismo bug, encontrado en la
+    re-revisión: el COPY se chequeaba, el STORE y el EXPUNGE no.
+
+    `store_ok` puede ser un bool (aplica a todos los STORE por igual) o
+    una lista de bools consumida en orden: devolver_a_bandeja hace DOS
+    STORE distintos (uno para sacar \\Seen, otro para marcar \\Deleted),
+    y algunos tests necesitan que fallen en momentos distintos.
     """
 
-    def __init__(self, uid_buscado=b"77", copy_ok=True):
+    def __init__(self, uid_buscado=b"77", copy_ok=True,
+                 store_ok=True, expunge_ok=True):
         self.comandos = []
         self.seleccionadas = []
         self.uid_buscado = uid_buscado
         self.copy_ok = copy_ok
+        self.expunge_ok = expunge_ok
+        if isinstance(store_ok, (list, tuple)):
+            self._store_ok_secuencia = list(store_ok)
+            self._store_ok_fijo = None
+        else:
+            self._store_ok_secuencia = None
+            self._store_ok_fijo = store_ok
+
+    def _siguiente_store_ok(self):
+        if self._store_ok_secuencia is not None:
+            # Una vez consumida la lista, sigue confirmando OK -ningún
+            # test de acá necesita más de dos STORE por llamada.
+            return (self._store_ok_secuencia.pop(0)
+                    if self._store_ok_secuencia else True)
+        return self._store_ok_fijo
 
     def login(self, *a, **k):
         pass
@@ -45,8 +68,12 @@ class _IMAPFalso:
         if comando == "COPY":
             return (("OK", [None]) if self.copy_ok
                     else ("NO", [b"[TRYCREATE] no existe la carpeta"]))
-        if comando in ("STORE", "EXPUNGE"):
-            return ("OK", [None])
+        if comando == "STORE":
+            return (("OK", [None]) if self._siguiente_store_ok()
+                    else ("NO", [b"no se pudo marcar"]))
+        if comando == "EXPUNGE":
+            return (("OK", [None]) if self.expunge_ok
+                    else ("NO", [b"no se pudo expurgar"]))
         raise AssertionError(f"comando UID no esperado por el doble: {comando}")
 
     def logout(self):
@@ -199,6 +226,29 @@ class MoverA(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual([c[0] for c in fake.comandos], ["SEARCH"])
 
+    def test_con_store_no_queda_a_medias(self):
+        """El hermano del Crítico 1: el COPY se chequeaba, el STORE no.
+        Con el COPY ya confirmado, un STORE +Deleted rechazado con NO no
+        puede devolver True (no terminó) ni False (sí se copió algo):
+        el mensaje ya existe en destino. Tampoco sigue de largo hacia el
+        EXPUNGE -eso expurgaría sin nada marcado, un no-op que sólo
+        agrega ruido al log."""
+        fake = _IMAPFalso(copy_ok=True, store_ok=False)
+        with mock.patch.object(correo, "abrir_buzon", return_value=fake):
+            with self.assertRaises(correo.OperacionAMedias):
+                correo.mover_a("<x@y>", "INBOX.Ruido")
+        nombres = [c[0] for c in fake.comandos]
+        self.assertEqual(nombres, ["SEARCH", "COPY", "STORE"])
+        self.assertNotIn("EXPUNGE", nombres)
+
+    def test_con_expunge_no_queda_a_medias(self):
+        fake = _IMAPFalso(copy_ok=True, store_ok=True, expunge_ok=False)
+        with mock.patch.object(correo, "abrir_buzon", return_value=fake):
+            with self.assertRaises(correo.OperacionAMedias):
+                correo.mover_a("<x@y>", "INBOX.Ruido")
+        self.assertEqual([c[0] for c in fake.comandos],
+                         ["SEARCH", "COPY", "STORE", "EXPUNGE"])
+
 
 class MarcarLeido(unittest.TestCase):
     def test_marca_seen_buscando_por_message_id(self):
@@ -217,6 +267,16 @@ class MarcarLeido(unittest.TestCase):
             ok = correo.marcar_leido("<no-existe@x>")
         self.assertFalse(ok)
         self.assertEqual([c[0] for c in fake.comandos], ["SEARCH"])
+
+    def test_si_el_store_no_confirma_devuelve_false(self):
+        """Mismo patrón que en mover_a/devolver_a_bandeja: acá no hay
+        COPY de por medio, así que un STORE que el servidor no confirma
+        no deja ningún duplicado -alcanza con False, sin necesidad de
+        OperacionAMedias."""
+        fake = _IMAPFalso(store_ok=False)
+        with mock.patch.object(correo, "abrir_buzon", return_value=fake):
+            ok = correo.marcar_leido("<x@y>")
+        self.assertFalse(ok)
 
 
 class DevolverABandeja(unittest.TestCase):
@@ -275,6 +335,37 @@ class DevolverABandeja(unittest.TestCase):
             ok = correo.devolver_a_bandeja("<no-existe@x>")
         self.assertFalse(ok)
         self.assertEqual([c[0] for c in fake.comandos], ["SEARCH"])
+
+    def test_si_el_store_menos_seen_no_confirma_no_copia_nada(self):
+        """Todavía no se tocó Ruido de ningún modo -el COPY ni siquiera
+        se intentó-, así que un NO acá es simplemente False: seguro
+        reintentar desde cero."""
+        fake = _IMAPFalso(store_ok=False)
+        with mock.patch.object(correo.imaplib, "IMAP4_SSL", return_value=fake):
+            ok = correo.devolver_a_bandeja("<r@x>")
+        self.assertFalse(ok)
+        self.assertEqual([c[0] for c in fake.comandos], ["SEARCH", "STORE"])
+
+    def test_con_store_deleted_no_queda_a_medias(self):
+        """El hermano del Crítico 1, acá también: con el COPY a INBOX ya
+        confirmado -el mensaje ya existe ahí, sin leer-, un STORE
+        +Deleted que el servidor no confirma en Ruido no puede
+        reportarse como éxito ni como "no pasó nada"."""
+        fake = _IMAPFalso(copy_ok=True, store_ok=[True, False])
+        with mock.patch.object(correo.imaplib, "IMAP4_SSL", return_value=fake):
+            with self.assertRaises(correo.OperacionAMedias):
+                correo.devolver_a_bandeja("<r@x>")
+        nombres = [c[0] for c in fake.comandos]
+        self.assertEqual(nombres, ["SEARCH", "STORE", "COPY", "STORE"])
+        self.assertNotIn("EXPUNGE", nombres)
+
+    def test_con_expunge_no_queda_a_medias(self):
+        fake = _IMAPFalso(copy_ok=True, store_ok=True, expunge_ok=False)
+        with mock.patch.object(correo.imaplib, "IMAP4_SSL", return_value=fake):
+            with self.assertRaises(correo.OperacionAMedias):
+                correo.devolver_a_bandeja("<r@x>")
+        self.assertEqual([c[0] for c in fake.comandos],
+                         ["SEARCH", "STORE", "COPY", "STORE", "EXPUNGE"])
 
 
 if __name__ == "__main__":
