@@ -11,6 +11,7 @@ que archive ruido, que es reversible, y otro día que marque leído.
 """
 import html
 import os
+import random
 import sys
 import threading
 import time
@@ -134,12 +135,25 @@ class Secretaria:
                 _registrar("escucha", e)
                 time.sleep(5)
 
+    def puede_escribir(self):
+        """Si la secretaria puede escribir en la casilla ahora mismo.
+
+        Junta los dos frenos en un solo lugar: EN_SECO (variable de
+        entorno, fija para todo el proceso) y self.pausada (que JP puede
+        prender desde Telegram). Hoy sólo lo usa mover_a, pero cuando las
+        tareas 9 a 11 conecten marcar_leido y devolver_a_bandeja, cada
+        punto nuevo tiene que pasar por acá en vez de repetir el chequeo
+        de EN_SECO suelto en cada lugar —que es justo como estaba antes.
+        """
+        return not EN_SECO and not self.pausada
+
     def revisar_casilla(self):
         """Trae lo nuevo, lo clasifica, archiva el ruido y avisa lo de JP.
 
-        La regla que manda: si ningún motor respondió, el correo se le
-        muestra a JP con los botones de siempre. El silencio no es una
-        categoría, así que nunca se archiva algo que no se pudo clasificar.
+        La regla que manda: si ningún motor respondió, o si respondió pero
+        no pudo decidir (DUDA), el correo se le muestra a JP con los
+        botones de siempre. El silencio no es una categoría, así que nunca
+        se archiva algo que no se pudo clasificar con confianza.
         """
         from datetime import date, timedelta
         entrantes = correo.traer_nuevos(date.today() - timedelta(days=1))
@@ -153,18 +167,43 @@ class Secretaria:
                 continue
             c["message_id"] = correo.identidad(c)
             nuevos += 1
+
+            # Atajo sin LLM, igual al de simulacro.py: si JP ya marcó este
+            # remitente como ruido dos veces o más, y nunca de otra forma,
+            # no hace falta gastar una llamada al único motor configurado
+            # -con cuota limitada- para que le diga lo mismo. protegido()
+            # manda sobre el atajo: sobre lo que JP ya se pronunció por
+            # escrito, el sistema no decide solo (una vez el filtro
+            # archivó una promoción de SiPago pese a que reglas.md decía
+            # explícitamente que no era ruido). Y 1 de cada
+            # MUESTREO_CONTROL igual se pregunta, para no dejar de medir
+            # si el criterio se degrada.
+            motivo_auto = (None if reglas.protegido(c)
+                           else reglas.es_ruido_conocido(c, direcciones, dominios))
+            if motivo_auto and random.randrange(reglas.MUESTREO_CONTROL):
+                memoria.anotar(self.cx, c, "RUIDO", f"ruido conocido — {motivo_auto}")
+                if self.puede_escribir() and correo.mover_a(c["message_id"], "INBOX.Ruido"):
+                    memoria.cambiar(self.cx, c["message_id"], "archivado")
+                continue
+
             try:
                 pred = clasificador.clasificar(sistema, c)
             except Exception as e:
                 # Ningún motor respondió. Se le muestra a JP igual: el
                 # silencio no es una categoría.
                 memoria.anotar(self.cx, c, "ERROR", f"{type(e).__name__}")
-                self.avisar_sin_clasificar(c)
+                self.avisar_para_que_decida(c)
                 continue
             memoria.anotar(self.cx, c, pred["categoria"], pred.get("motivo", ""))
-            if (pred["categoria"] == "RUIDO" and pred.get("unanime")
+            if pred["categoria"] == "DUDA":
+                # Resultado NORMAL de clasificar() cuando las pasadas no
+                # coinciden (11 de 46 casos medidos) -- no una excepción.
+                # Es exactamente el caso para el que existe DUDA: se le
+                # muestra a JP, nunca se archiva ni se pierde en silencio.
+                self.avisar_para_que_decida(c)
+            elif (pred["categoria"] == "RUIDO" and pred.get("unanime")
                     and not reglas.protegido(c)):
-                if not EN_SECO and correo.mover_a(c["message_id"], "INBOX.Ruido"):
+                if self.puede_escribir() and correo.mover_a(c["message_id"], "INBOX.Ruido"):
                     memoria.cambiar(self.cx, c["message_id"], "archivado")
             elif pred["categoria"] in ("TUYO", "ENZO", "NATALIA"):
                 if not c.get("ya_leido"):
@@ -197,12 +236,13 @@ class Secretaria:
             {"text": "No era mío", "callback_data": f"n|{tanda}-1|0"}]]})
         memoria.cambiar(self.cx, c["message_id"], "avisado")
 
-    def avisar_sin_clasificar(self, c):
-        """Ningún motor respondió. Se le muestra igual, con los botones de
+    def avisar_para_que_decida(self, c):
+        """Ningún motor respondió, o respondió pero no logró decidir
+        (DUDA). En los dos casos se le muestra igual, con los botones de
         siempre: si el sistema no sabe, decide JP. Nunca se archiva."""
         import secrets
         tanda = secrets.token_hex(2)
-        texto = (f"<b>⚠️ No pude clasificarlo</b>\n"
+        texto = (f"<b>⚠️ No pude decidir</b>\n"
                  f"<b>De:</b> {html.escape(c['de'][:90])}\n"
                  f"<b>Asunto:</b> {html.escape(c['asunto'][:120])}\n\n"
                  f"<pre>{html.escape((c['cuerpo'] or '')[:600])}</pre>\n\n"

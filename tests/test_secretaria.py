@@ -342,6 +342,122 @@ class RevisarCasilla(unittest.TestCase):
             self.s.revisar_casilla()
         self.assertEqual(cl.call_count, 1)
 
+    def test_duda_se_muestra_a_jp_y_no_se_archiva(self):
+        """Crítico 2: DUDA es un resultado NORMAL de clasificar() (dos
+        pasadas discrepan), no una excepción. Antes no caía en ninguna
+        rama del if/elif y quedaba enterrado en la base para siempre,
+        marcado 'mostrado_sin_clasificar' sin que JP lo hubiera visto
+        nunca -- la falla silenciosa que más preocupa, y la más difícil
+        de notar porque no imprime ningún error."""
+        with mock.patch.object(secretaria.correo, "traer_nuevos",
+                               return_value=[correo_falso("<5@x>", "Ambiguo")]), \
+             mock.patch.object(secretaria.clasificador, "clasificar",
+                               return_value={"categoria": "DUDA",
+                                             "motivo": "sin acuerdo",
+                                             "unanime": False}), \
+             mock.patch.object(secretaria.correo, "mover_a") as mover, \
+             mock.patch.object(secretaria.Secretaria,
+                               "avisar_para_que_decida") as avisar:
+            self.s.revisar_casilla()
+        mover.assert_not_called()
+        avisar.assert_called_once()
+        self.assertEqual(memoria.situacion(self.s.cx, "<5@x>"),
+                         "mostrado_sin_clasificar")
+
+
+class AtajoRuidoConocido(unittest.TestCase):
+    """Importante 5: si JP ya marcó este remitente como ruido, dos veces o
+    más y siempre, no hace falta gastar una llamada al único motor
+    configurado (con cuota limitada) para que le diga lo mismo. El atajo
+    replica exactamente los resguardos de simulacro.py: protegido() manda
+    sobre el atajo, y 1 de cada MUESTREO_CONTROL igual se pregunta para no
+    dejar de medir si el criterio se degrada."""
+
+    def setUp(self):
+        self.f = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.s = secretaria.Secretaria(cx=memoria.abrir(self.f.name))
+
+    def test_remitente_conocido_no_gasta_una_llamada_al_modelo(self):
+        with mock.patch.object(secretaria.correo, "traer_nuevos",
+                               return_value=[correo_falso("<6@x>", "Publi")]), \
+             mock.patch.object(secretaria.reglas, "remitentes_ruido",
+                               return_value=({"promo@ejemplo.com"}, set())), \
+             mock.patch.object(secretaria.reglas, "es_ruido_conocido",
+                               return_value="remitente promo@ejemplo.com"), \
+             mock.patch.object(secretaria.reglas, "protegido",
+                               return_value=False), \
+             mock.patch.object(secretaria.random, "randrange",
+                               return_value=1), \
+             mock.patch.object(secretaria.clasificador, "clasificar") as cl:
+            self.s.revisar_casilla()
+        cl.assert_not_called()
+        self.assertEqual(memoria.situacion(self.s.cx, "<6@x>"), "clasificado")
+
+    def test_protegido_manda_sobre_el_atajo(self):
+        """Sobre lo que JP ya se pronunció por escrito (roster.md o
+        reglas.md), el sistema no decide solo -- ni siquiera con el
+        atajo. El caso real: el filtro archivó una promoción de SiPago
+        pese a que reglas.md decía explícitamente que no era ruido."""
+        with mock.patch.object(secretaria.correo, "traer_nuevos",
+                               return_value=[correo_falso("<7@x>", "Publi")]), \
+             mock.patch.object(secretaria.reglas, "remitentes_ruido",
+                               return_value=({"promo@ejemplo.com"}, set())), \
+             mock.patch.object(secretaria.reglas, "es_ruido_conocido",
+                               return_value="remitente promo@ejemplo.com"), \
+             mock.patch.object(secretaria.reglas, "protegido",
+                               return_value=True), \
+             mock.patch.object(secretaria.clasificador, "clasificar",
+                               return_value={"categoria": "RUIDO",
+                                             "motivo": "m",
+                                             "unanime": True}) as cl:
+            self.s.revisar_casilla()
+        cl.assert_called_once()
+
+    def test_uno_de_cada_n_igual_se_pregunta(self):
+        """El muestreo de control: aunque el remitente sea ruido conocido,
+        una fracción de las veces se le pregunta igual al modelo, para no
+        perder de vista si el criterio se degradó."""
+        with mock.patch.object(secretaria.correo, "traer_nuevos",
+                               return_value=[correo_falso("<8@x>", "Publi")]), \
+             mock.patch.object(secretaria.reglas, "remitentes_ruido",
+                               return_value=({"promo@ejemplo.com"}, set())), \
+             mock.patch.object(secretaria.reglas, "es_ruido_conocido",
+                               return_value="remitente promo@ejemplo.com"), \
+             mock.patch.object(secretaria.reglas, "protegido",
+                               return_value=False), \
+             mock.patch.object(secretaria.random, "randrange",
+                               return_value=0), \
+             mock.patch.object(secretaria.clasificador, "clasificar",
+                               return_value={"categoria": "RUIDO",
+                                             "motivo": "m",
+                                             "unanime": True}) as cl:
+            self.s.revisar_casilla()
+        cl.assert_called_once()
+
+
+class PuedeEscribir(unittest.TestCase):
+    """Menor 6: un solo lugar junta los dos frenos (EN_SECO y pausada),
+    así cada punto nuevo que escriba en la casilla (tarea 9 a 11) no
+    tiene que acordarse de repetir el chequeo."""
+
+    def setUp(self):
+        self.f = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.s = secretaria.Secretaria(cx=memoria.abrir(self.f.name))
+
+    def test_en_seco_no_puede_escribir(self):
+        with mock.patch.object(secretaria, "EN_SECO", True):
+            self.assertFalse(self.s.puede_escribir())
+
+    def test_con_el_freno_sacado_y_sin_pausa_si_puede(self):
+        with mock.patch.object(secretaria, "EN_SECO", False):
+            self.s.pausada = False
+            self.assertTrue(self.s.puede_escribir())
+
+    def test_pausada_no_puede_escribir_aunque_el_freno_este_sacado(self):
+        with mock.patch.object(secretaria, "EN_SECO", False):
+            self.s.pausada = True
+            self.assertFalse(self.s.puede_escribir())
+
 
 if __name__ == "__main__":
     unittest.main()

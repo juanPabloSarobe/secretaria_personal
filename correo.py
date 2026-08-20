@@ -214,13 +214,22 @@ def mover_a(message_id, carpeta):
 
     COPY + UID EXPUNGE porque el servidor no tiene MOVE pero sí UIDPLUS.
     Nunca EXPUNGE a secas: eso borraría otros mensajes marcados.
+
+    El `typ` del COPY se chequea a propósito: `imaplib` sólo levanta
+    excepción si el servidor contesta BAD. Una respuesta NO -carpeta que
+    no existe, cuota superada, un error transitorio- vuelve en silencio,
+    y sin este chequeo el código seguía igual con STORE +Deleted y
+    EXPUNGE: el primer COPY que el servidor rechazara borraba un correo
+    de JP sin haberlo copiado a ningún lado, de forma irreversible.
     """
     M = abrir_buzon(readonly=False)
     try:
         uid = _uid_de(M, message_id)
         if not uid:
             return False
-        M.uid("COPY", uid, carpeta)
+        typ, _ = M.uid("COPY", uid, carpeta)
+        if typ != "OK":
+            return False
         M.uid("STORE", uid, "+FLAGS", "(\\Deleted)")
         M.uid("EXPUNGE", uid)
         return True
@@ -246,6 +255,20 @@ def devolver_a_bandeja(message_id):
 
     Sin leer a propósito: si JP dice que no era ruido, tiene que
     encontrarlo como encontraría cualquier correo que no vio.
+
+    El orden importa. El \\Seen se saca ANTES del COPY -no después- porque
+    COPY duplica los flags tal como están en ese momento: si se sacara
+    después, un corte entre el EXPUNGE de Ruido y ese último STORE dejaba
+    la copia en INBOX marcada como leída para siempre, sin ningún rastro
+    de que hacía falta corregirla (la versión anterior tenía justo ese
+    problema). Y el borrado de Ruido queda como último paso: si el
+    proceso se corta en cualquier punto anterior, el mensaje sigue
+    existiendo en Ruido y una reintento repite la operación desde el
+    principio -en el peor caso deja un duplicado sin leer en INBOX y el
+    original todavía en Ruido, nunca un correo perdido o mal marcado.
+
+    El COPY se chequea igual que en mover_a: un NO sin excepción no puede
+    hacer que sigamos de largo borrando el original de Ruido.
     """
     M = imaplib.IMAP4_SSL(os.environ["IMAP_HOST"],
                           int(os.environ["IMAP_PORT"]), timeout=40)
@@ -255,13 +278,12 @@ def devolver_a_bandeja(message_id):
         uid = _uid_de(M, message_id)
         if not uid:
             return False
-        M.uid("COPY", uid, "INBOX")
+        M.uid("STORE", uid, "-FLAGS", "(\\Seen)")
+        typ, _ = M.uid("COPY", uid, "INBOX")
+        if typ != "OK":
+            return False
         M.uid("STORE", uid, "+FLAGS", "(\\Deleted)")
         M.uid("EXPUNGE", uid)
-        M.select("INBOX", readonly=False)
-        nuevo = _uid_de(M, message_id)
-        if nuevo:
-            M.uid("STORE", nuevo, "-FLAGS", "(\\Seen)")
         return True
     finally:
         M.logout()

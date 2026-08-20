@@ -1,9 +1,56 @@
 import email.utils
+import os
 import unittest
+import unittest.mock as mock
 from datetime import datetime, timedelta, timezone
 
 import correo
 from tests.material import mensajes
+
+
+class _IMAPFalso:
+    """Doble de imaplib.IMAP4_SSL que registra los comandos UID recibidos.
+
+    Existe porque los tests anteriores de mover_a/marcar_leido/
+    devolver_a_bandeja mockeaban `secretaria.correo.mover_a` entero: nunca
+    llegaban a ejecutar una sola línea de correo.py, y por ese agujero pasó
+    el bug real (COPY que devuelve NO sin excepción, seguido igual de
+    STORE +Deleted y EXPUNGE, borrando el correo sin haberlo copiado a
+    ningún lado). Este doble deja pasar el código real y solo finge la
+    respuesta del servidor.
+
+    `copy_ok=False` simula justo eso: un COPY que el servidor rechaza con
+    NO -imaplib únicamente levanta excepción ante un BAD, un NO vuelve en
+    silencio- para confirmar que el código de acá no sigue de largo como
+    si hubiera funcionado.
+    """
+
+    def __init__(self, uid_buscado=b"77", copy_ok=True):
+        self.comandos = []
+        self.seleccionadas = []
+        self.uid_buscado = uid_buscado
+        self.copy_ok = copy_ok
+
+    def login(self, *a, **k):
+        pass
+
+    def select(self, carpeta, readonly=True):
+        self.seleccionadas.append(carpeta)
+        return ("OK", [b"1"])
+
+    def uid(self, comando, *args):
+        self.comandos.append((comando, *args))
+        if comando == "SEARCH":
+            return ("OK", [self.uid_buscado if self.uid_buscado else b""])
+        if comando == "COPY":
+            return (("OK", [None]) if self.copy_ok
+                    else ("NO", [b"[TRYCREATE] no existe la carpeta"]))
+        if comando in ("STORE", "EXPUNGE"):
+            return ("OK", [None])
+        raise AssertionError(f"comando UID no esperado por el doble: {comando}")
+
+    def logout(self):
+        pass
 
 
 class Adjuntos(unittest.TestCase):
@@ -97,6 +144,137 @@ class FechaLegible(unittest.TestCase):
     def test_sin_cabecera_avisa_que_no_hay_fecha(self):
         self.assertEqual(correo.fecha_legible(""), "(sin fecha)")
         self.assertEqual(correo.fecha_legible(None), "(sin fecha)")
+
+
+class MoverA(unittest.TestCase):
+    """Crítico 1 + Crítico 3: mover_a() nunca puede borrar de INBOX un
+    correo que no se copió de verdad."""
+
+    def test_con_copy_ok_borra_de_inbox_en_orden(self):
+        fake = _IMAPFalso(copy_ok=True)
+        with mock.patch.object(correo, "abrir_buzon", return_value=fake):
+            ok = correo.mover_a("<x@y>", "INBOX.Ruido")
+        self.assertTrue(ok)
+        self.assertEqual([c[0] for c in fake.comandos],
+                         ["SEARCH", "COPY", "STORE", "EXPUNGE"])
+
+    def test_con_copy_no_no_borra_nada(self):
+        """El bug real: un COPY rechazado con NO no tira excepción, así
+        que sin este chequeo el código seguía con STORE +Deleted y
+        EXPUNGE igual, borrando el correo sin haberlo copiado a ningún
+        lado."""
+        fake = _IMAPFalso(copy_ok=False)
+        with mock.patch.object(correo, "abrir_buzon", return_value=fake):
+            ok = correo.mover_a("<x@y>", "INBOX.Ruido")
+        self.assertFalse(ok)
+        nombres = [c[0] for c in fake.comandos]
+        self.assertEqual(nombres, ["SEARCH", "COPY"])
+        self.assertNotIn("STORE", nombres)
+        self.assertNotIn("EXPUNGE", nombres)
+
+    def test_busca_por_message_id_no_por_numero(self):
+        fake = _IMAPFalso()
+        with mock.patch.object(correo, "abrir_buzon", return_value=fake):
+            correo.mover_a("<abc@x>", "INBOX.Ruido")
+        busqueda = fake.comandos[0]
+        self.assertEqual(busqueda[0], "SEARCH")
+        self.assertIn("HEADER", busqueda)
+        self.assertIn("Message-ID", busqueda)
+
+    def test_usa_uid_expunge_nunca_expunge_a_secas(self):
+        """Un EXPUNGE sin UID borra TODOS los mensajes marcados de la
+        carpeta, no solo el nuestro. El doble solo entiende comandos que
+        pasan por M.uid(...); si el código llamara a M.expunge() directo,
+        el doble no tiene ese método y la llamada explota."""
+        fake = _IMAPFalso()
+        with mock.patch.object(correo, "abrir_buzon", return_value=fake):
+            ok = correo.mover_a("<abc@x>", "INBOX.Ruido")
+        self.assertTrue(ok)
+        self.assertIn("EXPUNGE", [c[0] for c in fake.comandos])
+
+    def test_si_no_encuentra_el_correo_no_toca_nada(self):
+        fake = _IMAPFalso(uid_buscado=None)
+        with mock.patch.object(correo, "abrir_buzon", return_value=fake):
+            ok = correo.mover_a("<no-existe@x>", "INBOX.Ruido")
+        self.assertFalse(ok)
+        self.assertEqual([c[0] for c in fake.comandos], ["SEARCH"])
+
+
+class MarcarLeido(unittest.TestCase):
+    def test_marca_seen_buscando_por_message_id(self):
+        fake = _IMAPFalso()
+        with mock.patch.object(correo, "abrir_buzon", return_value=fake):
+            ok = correo.marcar_leido("<x@y>")
+        self.assertTrue(ok)
+        self.assertEqual([c[0] for c in fake.comandos], ["SEARCH", "STORE"])
+        store = fake.comandos[1]
+        self.assertIn("+FLAGS", store)
+        self.assertIn("(\\Seen)", store)
+
+    def test_si_no_encuentra_el_correo_no_toca_nada(self):
+        fake = _IMAPFalso(uid_buscado=None)
+        with mock.patch.object(correo, "abrir_buzon", return_value=fake):
+            ok = correo.marcar_leido("<no-existe@x>")
+        self.assertFalse(ok)
+        self.assertEqual([c[0] for c in fake.comandos], ["SEARCH"])
+
+
+class DevolverABandeja(unittest.TestCase):
+    """Crítico 1 (mismo patrón que mover_a) + Importante 4: el mensaje
+    tiene que quedar SIN LEER en INBOX incluso si el proceso se corta a
+    mitad de camino."""
+
+    def setUp(self):
+        self.env = mock.patch.dict(os.environ, {
+            "IMAP_HOST": "imap.test", "IMAP_PORT": "993",
+            "IMAP_USER": "u", "IMAP_PASSWORD": "p"})
+        self.env.start()
+        self.addCleanup(self.env.stop)
+
+    def test_con_copy_ok_queda_sin_leer_en_inbox(self):
+        fake = _IMAPFalso(copy_ok=True)
+        with mock.patch.object(correo.imaplib, "IMAP4_SSL", return_value=fake):
+            ok = correo.devolver_a_bandeja("<r@x>")
+        self.assertTrue(ok)
+        self.assertEqual([c[0] for c in fake.comandos],
+                         ["SEARCH", "STORE", "COPY", "STORE", "EXPUNGE"])
+        self.assertEqual(fake.seleccionadas, ["INBOX.Ruido"])
+        # el \Seen se saca ANTES del COPY -- así la copia nace sin leer,
+        # sin depender de un segundo paso después de mover el mensaje.
+        primer_store = fake.comandos[1]
+        self.assertIn("-FLAGS", primer_store)
+        self.assertIn("(\\Seen)", primer_store)
+        segundo_store = fake.comandos[3]
+        self.assertIn("+FLAGS", segundo_store)
+        self.assertIn("(\\Deleted)", segundo_store)
+
+    def test_con_copy_no_el_correo_sigue_en_ruido(self):
+        """Mismo bug que mover_a: si el COPY a INBOX no se confirma, el
+        correo no puede desaparecer de Ruido sin haber llegado a ningún
+        lado."""
+        fake = _IMAPFalso(copy_ok=False)
+        with mock.patch.object(correo.imaplib, "IMAP4_SSL", return_value=fake):
+            ok = correo.devolver_a_bandeja("<r@x>")
+        self.assertFalse(ok)
+        nombres = [c[0] for c in fake.comandos]
+        self.assertEqual(nombres, ["SEARCH", "STORE", "COPY"])
+        self.assertNotIn("EXPUNGE", nombres)
+
+    def test_busca_por_message_id_no_por_numero(self):
+        fake = _IMAPFalso()
+        with mock.patch.object(correo.imaplib, "IMAP4_SSL", return_value=fake):
+            correo.devolver_a_bandeja("<r@x>")
+        busqueda = fake.comandos[0]
+        self.assertEqual(busqueda[0], "SEARCH")
+        self.assertIn("HEADER", busqueda)
+        self.assertIn("Message-ID", busqueda)
+
+    def test_si_no_encuentra_el_correo_no_toca_nada(self):
+        fake = _IMAPFalso(uid_buscado=None)
+        with mock.patch.object(correo.imaplib, "IMAP4_SSL", return_value=fake):
+            ok = correo.devolver_a_bandeja("<no-existe@x>")
+        self.assertFalse(ok)
+        self.assertEqual([c[0] for c in fake.comandos], ["SEARCH"])
 
 
 if __name__ == "__main__":
