@@ -159,6 +159,7 @@ class Secretaria:
         entrantes = correo.traer_nuevos(date.today() - timedelta(days=1))
         sistema = clasificador.prompt_sistema()
         direcciones, dominios = reglas.remitentes_ruido()
+        frases = reglas.codigos_convenidos()
         nuevos = 0
         for c in entrantes:
             if memoria.situacion(self.cx, correo.identidad(c)) is not None:
@@ -167,6 +168,25 @@ class Secretaria:
                 continue
             c["message_id"] = correo.identidad(c)
             nuevos += 1
+
+            # Un código convenido gana sobre todo, igual que en
+            # simulacro.py: JP acordó esa frase con su interlocutor para
+            # marcar que el correo es suyo, así que ninguna heurística
+            # -ni el ruido conocido, ni protegido(), ni el clasificador-
+            # puede taparlo. Es la alternativa que JP eligió en vez de
+            # tener que avisarle al bot cada vez que espera algo
+            # importante: la señal deliberada de una persona gana sobre
+            # cualquier estadística. Sin consultar al modelo: la frase
+            # está o no está.
+            codigo = reglas.tiene_codigo(c, frases)
+            if codigo:
+                pred = {"categoria": "TUYO", "confianza": "alta",
+                        "unanime": True, "pasadas": 0,
+                        "motivo": f"código convenido: «{codigo}»"}
+                memoria.anotar(self.cx, c, pred["categoria"], pred["motivo"])
+                if not c.get("ya_leido"):
+                    self.avisar_en_el_momento(c, pred)
+                continue
 
             # Atajo sin LLM, igual al de simulacro.py: si JP ya marcó este
             # remitente como ruido dos veces o más, y nunca de otra forma,

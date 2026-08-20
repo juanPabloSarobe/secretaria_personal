@@ -459,5 +459,77 @@ class PuedeEscribir(unittest.TestCase):
             self.assertFalse(self.s.puede_escribir())
 
 
+class CodigoConvenido(unittest.TestCase):
+    """Los códigos convenidos son frases que JP acuerda con sus
+    interlocutores ("tal cual lo charlado", hay siete en codigos.md).
+    Cuando aparecen, el correo es de JP sin discusión y sin consultar al
+    modelo -- JP descartó explícitamente la alternativa de tener que
+    avisarle al bot cuando espera algo importante ("mi idea es que el bot
+    me ayude a mí, no que yo le tenga que avisar cosas"). Gana sobre todo
+    lo demás: sobre el ruido conocido, sobre protegido(), sobre el
+    clasificador."""
+
+    def setUp(self):
+        self.f = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.s = secretaria.Secretaria(cx=memoria.abrir(self.f.name))
+
+    def _categoria_guardada(self, message_id):
+        fila = self.s.cx.execute(
+            "SELECT categoria FROM correos WHERE message_id = ?",
+            (message_id,)).fetchone()
+        return fila["categoria"] if fila else None
+
+    def test_codigo_convenido_es_tuyo_sin_consultar_al_modelo(self):
+        c = correo_falso("<9@x>", "Consulta")
+        c["cuerpo"] = "Va a ser tal cual lo charlado, gracias"
+        with mock.patch.object(secretaria.correo, "traer_nuevos",
+                               return_value=[c]), \
+             mock.patch.object(secretaria.reglas, "codigos_convenidos",
+                               return_value=["tal cual lo charlado"]), \
+             mock.patch.object(secretaria.clasificador, "clasificar") as cl, \
+             mock.patch.object(secretaria.correo, "mover_a") as mover:
+            self.s.revisar_casilla()
+        cl.assert_not_called()
+        mover.assert_not_called()
+        self.assertEqual(self._categoria_guardada("<9@x>"), "TUYO")
+
+    def test_el_codigo_gana_sobre_el_ruido_conocido(self):
+        """Un remitente que suele mandar ruido, pero que esta vez usa el
+        código convenido, es de JP -- la señal deliberada de una persona
+        gana sobre el histórico estadístico."""
+        c = correo_falso("<10@x>", "Consulta", de="promo@ejemplo.com")
+        c["cuerpo"] = "de acuerdo a lo conversado te mando esto"
+        with mock.patch.object(secretaria.correo, "traer_nuevos",
+                               return_value=[c]), \
+             mock.patch.object(secretaria.reglas, "codigos_convenidos",
+                               return_value=["de acuerdo a lo conversado"]), \
+             mock.patch.object(secretaria.reglas, "es_ruido_conocido",
+                               return_value="remitente promo@ejemplo.com"), \
+             mock.patch.object(secretaria.reglas, "protegido",
+                               return_value=False), \
+             mock.patch.object(secretaria.clasificador, "clasificar") as cl, \
+             mock.patch.object(secretaria.correo, "mover_a") as mover:
+            self.s.revisar_casilla()
+        cl.assert_not_called()
+        mover.assert_not_called()
+        self.assertEqual(self._categoria_guardada("<10@x>"), "TUYO")
+
+    def test_la_comparacion_no_distingue_acentos_ni_mayusculas(self):
+        """JP escribe desde el celular y a veces sin tildes. reglas.py ya
+        normaliza los dos lados de la comparación (ver test_reglas.py);
+        esto confirma que la conexión en revisar_casilla no lo rompe."""
+        c = correo_falso("<11@x>", "Consulta")
+        c["cuerpo"] = "TAL CUAL LO CHARLADO, como dijimos"
+        with mock.patch.object(secretaria.correo, "traer_nuevos",
+                               return_value=[c]), \
+             mock.patch.object(secretaria.reglas, "codigos_convenidos",
+                               return_value=["tal cual lo charlado"]), \
+             mock.patch.object(secretaria.clasificador, "clasificar") as cl:
+            self.s.revisar_casilla()
+        cl.assert_not_called()
+        self.assertEqual(self._categoria_guardada("<11@x>"), "TUYO")
+
+
+
 if __name__ == "__main__":
     unittest.main()
