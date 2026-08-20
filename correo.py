@@ -266,6 +266,45 @@ def mover_a(message_id, carpeta):
         M.logout()
 
 
+def borrar_el_original(message_id):
+    """Saca de INBOX un mensaje que YA está copiado en otra carpeta.
+
+    Es la mitad que falta cuando mover_a() levanta OperacionAMedias: el
+    COPY se confirmó pero el STORE +Deleted o el UID EXPUNGE no, así que
+    el mensaje está en las dos carpetas a la vez. Reintentar mover_a()
+    entero en ese estado vuelve a copiar y deja un duplicado NUEVO en el
+    destino por cada vuelta del ciclo -con una falla sostenida del lado
+    del borrado (cuota agotada en esa carpeta, por ejemplo) eso acumula
+    varias copias por hora. Esta función no hace COPY nunca: por eso
+    existe separada en vez de un parámetro de mover_a().
+
+    Devuelve True si borró, y False si el mensaje ya no está en INBOX
+    -el EXPUNGE anterior sí había salido y la respuesta se perdió, o JP
+    lo borró a mano-: en los dos casos el estado final es el que se
+    quería y no hay nada más que hacer. Si el STORE o el EXPUNGE
+    vuelven NO, sigue a medias y levanta OperacionAMedias, igual que
+    mover_a: el estado no cambió y el reintento es el mismo.
+    """
+    M = abrir_buzon(readonly=False)
+    try:
+        uid = _uid_de(M, message_id)
+        if not uid:
+            return False
+        typ, _ = M.uid("STORE", uid, "+FLAGS", "(\\Deleted)")
+        if typ != "OK":
+            raise OperacionAMedias(
+                f"{message_id}: sigue copiado en el destino y sin poder"
+                " marcarse para borrar en INBOX")
+        typ, _ = M.uid("EXPUNGE", uid)
+        if typ != "OK":
+            raise OperacionAMedias(
+                f"{message_id}: marcado para borrar en INBOX, pero el"
+                " EXPUNGE no se confirmó -- sigue duplicado")
+        return True
+    finally:
+        M.logout()
+
+
 def marcar_leido(message_id):
     """Marca un mensaje como leído sin tocar ninguna otra cosa."""
     M = abrir_buzon(readonly=False)

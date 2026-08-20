@@ -112,6 +112,66 @@ class Correcciones(unittest.TestCase):
         self.assertEqual(fila["situacion"], "corregido")
 
 
+class Intentos(unittest.TestCase):
+    """El contador de intentos de archivado vive en la base y no en la
+    memoria del proceso: los reintentos tienen que sobrevivir a un
+    reinicio. Si el contador se perdiera cada vez que launchd levanta el
+    proceso de nuevo, el tope no se alcanzaría nunca y el correo se
+    reintentaría para siempre, que es justo lo que se está arreglando."""
+
+    def setUp(self):
+        self.f = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.cx = memoria.abrir(self.f.name)
+
+    def tearDown(self):
+        self.cx.close()
+        os.unlink(self.f.name)
+
+    def test_un_correo_recien_anotado_no_tiene_intentos(self):
+        memoria.anotar(self.cx, un_correo(), "RUIDO", "promo")
+        fila = self.cx.execute("SELECT intentos FROM correos WHERE"
+                               " message_id = ?", ("<a@b.com>",)).fetchone()
+        self.assertEqual(fila["intentos"], 0)
+
+    def test_cada_intento_suma_uno_y_devuelve_cuantos_van(self):
+        memoria.anotar(self.cx, un_correo(), "RUIDO", "promo")
+        self.assertEqual(memoria.sumar_intento(self.cx, "<a@b.com>"), 1)
+        self.assertEqual(memoria.sumar_intento(self.cx, "<a@b.com>"), 2)
+        self.assertEqual(memoria.sumar_intento(self.cx, "<a@b.com>"), 3)
+
+    def test_los_intentos_de_un_correo_no_cuentan_para_otro(self):
+        memoria.anotar(self.cx, un_correo("<1@x>"), "RUIDO", "promo")
+        memoria.anotar(self.cx, un_correo("<2@x>"), "RUIDO", "promo")
+        memoria.sumar_intento(self.cx, "<1@x>")
+        memoria.sumar_intento(self.cx, "<1@x>")
+        self.assertEqual(memoria.sumar_intento(self.cx, "<2@x>"), 1)
+
+
+class BaseVieja(unittest.TestCase):
+    def test_una_base_sin_la_columna_intentos_se_migra_sola(self):
+        """La base que ya corre en la Mac mini se creó sin `intentos`, y
+        CREATE TABLE IF NOT EXISTS no toca una tabla que ya existe. Sin
+        migración, el primer reintento de archivado reventaría con
+        OperationalError contra la casilla de verdad y no acá."""
+        import sqlite3
+        f = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        vieja = sqlite3.connect(f.name)
+        vieja.execute(
+            "CREATE TABLE correos (message_id TEXT PRIMARY KEY, uid TEXT,"
+            " de TEXT, para TEXT, cc TEXT, asunto TEXT, fecha TEXT,"
+            " cuerpo TEXT, adjuntos TEXT, categoria TEXT, motivo TEXT,"
+            " categoria_jp TEXT, explicacion TEXT, situacion TEXT NOT NULL,"
+            " visto TEXT NOT NULL, actualizado TEXT NOT NULL)")
+        vieja.commit()
+        vieja.close()
+
+        cx = memoria.abrir(f.name)
+        memoria.anotar(cx, un_correo(), "RUIDO", "promo")
+        self.assertEqual(memoria.sumar_intento(cx, "<a@b.com>"), 1)
+        cx.close()
+        os.unlink(f.name)
+
+
 class Latido(unittest.TestCase):
     def test_sin_latidos_devuelve_none(self):
         f = tempfile.NamedTemporaryFile(suffix=".db", delete=False)

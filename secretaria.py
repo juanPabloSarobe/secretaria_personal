@@ -21,6 +21,18 @@ import bot, clasificador, correo, memoria, reglas
 
 EN_SECO = os.environ.get("SECRETARIA_EN_SECO", "true").lower() != "false"
 CADA = 180                    # cada cuánto mira la casilla, en segundos
+
+# Cuántas veces se reintenta archivar un correo antes de rendirse y
+# avisarle a JP. Cinco intentos, uno por vuelta del ciclo, son unos 15
+# minutos: alcanza de sobra para que se resuelva sola una caída corta de
+# red o un servidor IMAP que se reinicia -- las fallas que de verdad se
+# arreglan solas duran segundos, no un cuarto de hora. Y tiene que ser
+# MUCHO menos que la ventana de traer_nuevos (un día): pasada esa
+# ventana el correo ya no vuelve a aparecer entre los entrantes y el
+# reintento se apagaría solo, en silencio, que es exactamente la falla
+# que no queremos. Con cinco, el correo siempre llega a un estado final
+# -archivado o avisado- mucho antes de salirse de la ventana.
+INTENTOS_MAXIMOS = 5
 POLL_HILOS = 1                 # cada cuánto arrancar() se fija que sigan vivos
 HORA_INICIO, HORA_FIN = 8, 19
 
@@ -175,9 +187,58 @@ class Secretaria:
                 # "clasificado" si venía de un reintento, para no quedar
                 # dando vueltas en pendiente_de_archivar para siempre.
                 memoria.cambiar(self.cx, c["message_id"], "clasificado")
+        except correo.OperacionAMedias as e:
+            # Esta excepción dice algo que ninguna otra dice: la copia YA
+            # está en Ruido y lo único que faltó fue borrar el original.
+            # Reintentar el mover_a entero desde acá vuelve a copiar y
+            # deja un duplicado nuevo en Ruido por cada vuelta del ciclo
+            # -con una falla sostenida del lado del borrado eso acumula
+            # varias copias por hora-. Por eso queda en una situación
+            # distinta, que reintenta sólo el borrado.
+            self._anotar_falla(c, e, "pendiente_de_borrar")
         except Exception as e:
-            _registrar("archivar", e)
-            memoria.cambiar(self.cx, c["message_id"], "pendiente_de_archivar")
+            # Cualquier otra falla (red caída, timeout, login rechazado):
+            # no sabemos si se copió algo, y mover_a con el COPY fallado
+            # no cambió nada, así que reintentar la mudanza entera es
+            # seguro.
+            self._anotar_falla(c, e, "pendiente_de_archivar")
+
+    def _terminar_de_archivar(self, c):
+        """Reintenta SÓLO el borrado del original, sin volver a copiar.
+
+        Es el reintento del caso a medias: la copia ya está en Ruido. Que
+        correo.borrar_el_original() devuelva False -el mensaje ya no está
+        en INBOX- también termina el trabajo: la copia está en Ruido y
+        INBOX quedó limpio, que es todo lo que se quería.
+        """
+        if not self.puede_escribir():
+            return
+        try:
+            correo.borrar_el_original(c["message_id"])
+            memoria.cambiar(self.cx, c["message_id"], "archivado")
+        except Exception as e:
+            self._anotar_falla(c, e, "pendiente_de_borrar")
+
+    def _anotar_falla(self, c, e, pendiente):
+        """Cuenta el intento fallido y decide si se sigue reintentando.
+
+        Sin tope, un archivado que falla siempre se reintenta cada CADA
+        segundos para siempre y lo único que queda es una línea en un log
+        que nadie mira: la falla silenciosa que el diseño dice que es la
+        que más preocupa, porque no recibir avisos se parece demasiado a
+        un día tranquilo. Al agotarse los intentos el correo pasa a
+        "no_se_pudo_archivar" -que revisar_casilla ya no reintenta- y JP
+        se entera por Telegram. El aviso sale UNA sola vez por
+        construcción: la situación final no vuelve a entrar nunca en la
+        rama de reintento.
+        """
+        _registrar("archivar", e)
+        intentos = memoria.sumar_intento(self.cx, c["message_id"])
+        if intentos >= INTENTOS_MAXIMOS:
+            memoria.cambiar(self.cx, c["message_id"], "no_se_pudo_archivar")
+            self.avisar_que_no_se_pudo_archivar(c, e)
+        else:
+            memoria.cambiar(self.cx, c["message_id"], pendiente)
 
     def revisar_casilla(self):
         """Trae lo nuevo, lo clasifica, archiva el ruido y avisa lo de JP.
@@ -197,15 +258,21 @@ class Secretaria:
             identidad = correo.identidad(c)
             situacion_previa = memoria.situacion(self.cx, identidad)
 
-            if situacion_previa == "pendiente_de_archivar":
+            if situacion_previa in ("pendiente_de_archivar",
+                                    "pendiente_de_borrar"):
                 # Ya se decidió RUIDO en un ciclo anterior; lo único que
-                # falló fue la escritura (red caída, o un COPY confirmado
-                # con el borrado a medias). Se reintenta sólo esa parte,
-                # sin volver a consultar al modelo -no hay nada nuevo que
+                # falló fue la escritura. Se reintenta sólo esa parte, sin
+                # volver a consultar al modelo -no hay nada nuevo que
                 # decidir- y sin contarlo en `nuevos`, porque no es un
-                # correo nuevo.
+                # correo nuevo. Cuál de las dos situaciones sea decide
+                # QUÉ se reintenta, y ahí está la diferencia entre
+                # archivar bien y llenar Ruido de duplicados: si el COPY
+                # ya se había confirmado, se reintenta sólo el borrado.
                 c["message_id"] = identidad
-                self._archivar(c)
+                if situacion_previa == "pendiente_de_borrar":
+                    self._terminar_de_archivar(c)
+                else:
+                    self._archivar(c)
                 continue
 
             if situacion_previa is not None:
@@ -314,6 +381,27 @@ class Secretaria:
                  f"<pre>{html.escape((c['cuerpo'] or '')[:600])}</pre>\n\n"
                  f"¿Qué correspondía?")
         self.enviar(texto, bot.teclado(1, tanda))
+
+    def avisar_que_no_se_pudo_archivar(self, c, e):
+        """Le avisa a JP que un correo se quedó sin intentos.
+
+        Va sin botones y sin chequear en_horario(): no es una decisión
+        que JP tenga que tomar en el momento ni un correo más para
+        triar, es una falla del sistema, y son rarísimas -si empiezan a
+        ser frecuentes, enterarse rápido es justamente lo que hace
+        falta. Dice de quién es el correo y de qué se trata para que JP
+        pueda encontrarlo en la bandeja sin buscar en ningún log, y qué
+        falló para que se entienda si es cosa del servidor o de la
+        casilla.
+        """
+        texto = (f"<b>🚨 No pude archivar un correo</b>\n"
+                 f"<b>De:</b> {html.escape(str(c.get('de', ''))[:90])}\n"
+                 f"<b>Asunto:</b> {html.escape(str(c.get('asunto', ''))[:120])}\n"
+                 f"<b>Falló:</b> "
+                 f"{html.escape(f'{type(e).__name__}: {e}'[:250])}\n\n"
+                 f"Lo intenté {INTENTOS_MAXIMOS} veces y dejo de "
+                 f"intentar. Quedó en tu bandeja, sin archivar.")
+        self.enviar(texto)
 
     def enviar(self, texto, teclado=None):
         """Manda a Telegram. Una falla acá no puede matar el proceso."""

@@ -21,9 +21,17 @@ import os
 import sqlite3
 import threading
 
+# "pendiente_de_borrar" y "pendiente_de_archivar" NO son sinónimos, y la
+# diferencia es lo que evita llenar Ruido de duplicados: en el primer caso
+# la copia ya está hecha y sólo falta borrar el original de INBOX (hay que
+# reintentar sólo el borrado, nunca un COPY nuevo); en el segundo no se
+# copió nada todavía y hay que reintentar la mudanza entera.
+# "no_se_pudo_archivar" es el final del camino: se agotaron los intentos,
+# el correo deja de reintentarse y JP ya recibió el aviso.
 SITUACIONES = {"clasificado", "archivado", "en_resumen", "avisado",
                "cerrado", "corregido", "mostrado_sin_clasificar",
-               "pendiente_de_archivar"}
+               "pendiente_de_archivar", "pendiente_de_borrar",
+               "no_se_pudo_archivar"}
 
 # RLock y no Lock: alguna función de acá podría terminar llamando a otra
 # de acá (p.ej. anotar() llamaba a situacion()), y con un Lock simple eso
@@ -47,7 +55,8 @@ CREATE TABLE IF NOT EXISTS correos (
     explicacion  TEXT,
     situacion    TEXT NOT NULL,
     visto        TEXT NOT NULL,
-    actualizado  TEXT NOT NULL
+    actualizado  TEXT NOT NULL,
+    intentos     INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS por_situacion ON correos(situacion);
 CREATE TABLE IF NOT EXISTS latidos (momento TEXT PRIMARY KEY);
@@ -61,8 +70,25 @@ def abrir(ruta="datos/secretaria.db"):
         cx.row_factory = sqlite3.Row
         cx.execute("PRAGMA journal_mode=WAL")   # dos hilos sin pisarse
         cx.executescript(ESQUEMA)
+        _migrar(cx)
         cx.commit()
         return cx
+
+
+def _migrar(cx):
+    """Agrega a una base que ya existe las columnas que el esquema ganó
+    después.
+
+    `CREATE TABLE IF NOT EXISTS` no toca una tabla que ya está: la base
+    que corre hace semanas en la Mac mini se creó sin `intentos`, así que
+    sin esto el primer reintento de archivado reventaría con
+    OperationalError en la Mac mini y no acá con los tests. Es
+    idempotente a propósito: se ejecuta en cada `abrir()`.
+    """
+    columnas = {f["name"] for f in cx.execute("PRAGMA table_info(correos)")}
+    if "intentos" not in columnas:
+        cx.execute("ALTER TABLE correos ADD COLUMN intentos"
+                   " INTEGER NOT NULL DEFAULT 0")
 
 
 def _ahora():
@@ -112,6 +138,25 @@ def cambiar(cx, message_id, nueva):
         cx.execute("UPDATE correos SET situacion = ?, actualizado = ?"
                    " WHERE message_id = ?", (nueva, _ahora(), message_id))
         cx.commit()
+
+
+def sumar_intento(cx, message_id):
+    """Cuenta un intento fallido de archivado y devuelve cuántos van.
+
+    El contador va en la base y no en un diccionario del proceso porque
+    los reintentos tienen que sobrevivir a un reinicio: launchd levanta
+    esto de nuevo cada vez que se cae, y con el contador en memoria el
+    tope no se alcanzaría nunca -el correo volvería a reintentarse para
+    siempre, que es justo lo que se está arreglando.
+    """
+    with _CANDADO:
+        cx.execute("UPDATE correos SET intentos = intentos + 1,"
+                   " actualizado = ? WHERE message_id = ?",
+                   (_ahora(), message_id))
+        cx.commit()
+        f = cx.execute("SELECT intentos FROM correos WHERE message_id = ?",
+                       (message_id,)).fetchone()
+    return f["intentos"] if f else 0
 
 
 def pendientes(cx, sit):

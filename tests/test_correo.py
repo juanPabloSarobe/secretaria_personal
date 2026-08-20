@@ -250,6 +250,74 @@ class MoverA(unittest.TestCase):
                          ["SEARCH", "COPY", "STORE", "EXPUNGE"])
 
 
+class BorrarElOriginal(unittest.TestCase):
+    """El reintento del caso a medias: la copia YA está en el destino, así
+    que lo único que falta es sacar el original de INBOX.
+
+    Si este reintento volviera a copiar -o sea, si se reintentara mover_a()
+    entero- cada vuelta del ciclo agregaría un duplicado nuevo en Ruido, y
+    con una falla sostenida del lado del borrado (cuota agotada en esa
+    carpeta, por ejemplo) eso acumula varias copias por hora sin que nadie
+    se entere. Por eso esta función existe aparte y no hace COPY nunca."""
+
+    def test_borra_sin_volver_a_copiar(self):
+        fake = _IMAPFalso()
+        with mock.patch.object(correo, "abrir_buzon", return_value=fake):
+            ok = correo.borrar_el_original("<x@y>")
+        self.assertTrue(ok)
+        nombres = [c[0] for c in fake.comandos]
+        self.assertEqual(nombres, ["SEARCH", "STORE", "EXPUNGE"])
+        self.assertNotIn("COPY", nombres)
+        self.assertEqual(fake.comandos[1][2:], ("+FLAGS", "(\\Deleted)"))
+
+    def test_busca_por_message_id_no_por_numero(self):
+        fake = _IMAPFalso()
+        with mock.patch.object(correo, "abrir_buzon", return_value=fake):
+            correo.borrar_el_original("<abc@x>")
+        busqueda = fake.comandos[0]
+        self.assertEqual(busqueda[0], "SEARCH")
+        self.assertIn("HEADER", busqueda)
+        self.assertIn("Message-ID", busqueda)
+
+    def test_si_ya_no_esta_en_inbox_no_hay_nada_que_borrar(self):
+        """No es un fallo: el original ya no está donde se lo iba a borrar
+        -el EXPUNGE anterior sí había salido y no nos enteramos, o JP lo
+        borró a mano- y la copia sigue en Ruido. El estado final es el que
+        se quería."""
+        fake = _IMAPFalso(uid_buscado=None)
+        with mock.patch.object(correo, "abrir_buzon", return_value=fake):
+            ok = correo.borrar_el_original("<no-existe@x>")
+        self.assertFalse(ok)
+        self.assertEqual([c[0] for c in fake.comandos], ["SEARCH"])
+
+    def test_si_el_store_no_confirma_sigue_a_medias(self):
+        fake = _IMAPFalso(store_ok=False)
+        with mock.patch.object(correo, "abrir_buzon", return_value=fake):
+            with self.assertRaises(correo.OperacionAMedias):
+                correo.borrar_el_original("<x@y>")
+        nombres = [c[0] for c in fake.comandos]
+        self.assertEqual(nombres, ["SEARCH", "STORE"])
+        self.assertNotIn("EXPUNGE", nombres)
+
+    def test_si_el_expunge_no_confirma_sigue_a_medias(self):
+        fake = _IMAPFalso(expunge_ok=False)
+        with mock.patch.object(correo, "abrir_buzon", return_value=fake):
+            with self.assertRaises(correo.OperacionAMedias):
+                correo.borrar_el_original("<x@y>")
+        self.assertEqual([c[0] for c in fake.comandos],
+                         ["SEARCH", "STORE", "EXPUNGE"])
+
+    def test_usa_uid_expunge_nunca_expunge_a_secas(self):
+        """El doble sólo entiende comandos que pasan por M.uid(...): si el
+        código llamara a M.expunge() directo -que borra TODOS los mensajes
+        marcados de la carpeta, no sólo el nuestro- no existe ese método y
+        la llamada explota sola."""
+        fake = _IMAPFalso()
+        with mock.patch.object(correo, "abrir_buzon", return_value=fake):
+            self.assertTrue(correo.borrar_el_original("<x@y>"))
+        self.assertIn("EXPUNGE", [c[0] for c in fake.comandos])
+
+
 class MarcarLeido(unittest.TestCase):
     def test_marca_seen_buscando_por_message_id(self):
         fake = _IMAPFalso()

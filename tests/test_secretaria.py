@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 import memoria
 import secretaria
+from tests.test_correo import _IMAPFalso
 
 
 def correo_falso(mid, asunto, de="promo@ejemplo.com"):
@@ -558,10 +559,14 @@ class Reintento(unittest.TestCase):
         self.assertEqual(memoria.situacion(self.s.cx, "<12@x>"),
                          "pendiente_de_archivar")
 
-    def test_una_operacion_a_medias_tambien_deja_pendiente_de_archivar(self):
-        """correo.OperacionAMedias es una excepción más para este
-        propósito: tampoco puede confirmarse como archivado, así que
-        también deja el correo pendiente de reintento."""
+    def test_una_operacion_a_medias_deja_pendiente_de_borrar(self):
+        """OperacionAMedias dice algo que ninguna otra excepción dice: la
+        copia YA está hecha en Ruido y lo único que falta es borrar el
+        original de INBOX. Por eso no deja "pendiente_de_archivar" -que
+        reintentaría el mover_a entero, con COPY nuevo y un duplicado por
+        vuelta- sino "pendiente_de_borrar", que reintenta sólo el borrado.
+        (Este test antes esperaba "pendiente_de_archivar": esa expectativa
+        es justo la que causaba la acumulación de duplicados.)"""
         c = correo_falso("<13@x>", "Promo")
         with mock.patch.object(secretaria, "EN_SECO", False), \
              mock.patch.object(secretaria.correo, "traer_nuevos",
@@ -575,7 +580,7 @@ class Reintento(unittest.TestCase):
                  side_effect=secretaria.correo.OperacionAMedias("a medias")):
             self.s.revisar_casilla()
         self.assertEqual(memoria.situacion(self.s.cx, "<13@x>"),
-                         "pendiente_de_archivar")
+                         "pendiente_de_borrar")
 
     def test_el_ciclo_siguiente_reintenta_sin_volver_a_clasificar(self):
         c = correo_falso("<14@x>", "Promo")
@@ -639,6 +644,178 @@ class Reintento(unittest.TestCase):
             self.s.revisar_casilla()
         self.assertEqual(memoria.situacion(self.s.cx, "<16@x>"),
                          "clasificado")
+
+
+
+class TopeDeReintentos(unittest.TestCase):
+    """El reintento de la ronda 3 no tenía tope: si archivar fallaba
+    siempre, revisar_casilla lo reintentaba cada 180 segundos para
+    siempre, sin avisarle a JP. Y cuando la falla era del lado del
+    borrado, cada vuelta hacía un COPY nuevo: varias copias por hora en
+    Ruido, indefinidamente y en silencio."""
+
+    def setUp(self):
+        self.f = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.s = secretaria.Secretaria(cx=memoria.abrir(self.f.name))
+
+    def test_una_falla_de_borrado_persistente_no_acumula_copias(self):
+        """El caso que motiva todo esto, contado en COPY: con el EXPUNGE
+        fallando siempre, el correo se copia UNA sola vez a Ruido. Antes,
+        cada vuelta del ciclo reintentaba el mover_a completo y dejaba
+        una copia nueva."""
+        c = correo_falso("<17@x>", "Promo")
+        fake = _IMAPFalso(copy_ok=True, store_ok=True, expunge_ok=False)
+        with mock.patch.object(secretaria, "EN_SECO", False), \
+             mock.patch.object(secretaria.correo, "abrir_buzon",
+                               return_value=fake), \
+             mock.patch.object(secretaria.correo, "traer_nuevos",
+                               return_value=[c]), \
+             mock.patch.object(secretaria.clasificador, "clasificar",
+                               return_value={"categoria": "RUIDO",
+                                             "motivo": "promo",
+                                             "unanime": True}), \
+             mock.patch.object(self.s, "enviar") as enviar:
+            for _ in range(10):
+                self.s.revisar_casilla()
+
+        copias = [x for x in fake.comandos if x[0] == "COPY"]
+        self.assertEqual(len(copias), 1,
+                         f"se hicieron {len(copias)} COPY: cada uno deja un"
+                         " duplicado en Ruido")
+        # Sí se reintentó: un intento de borrado por vuelta, hasta el tope.
+        expurgos = [x for x in fake.comandos if x[0] == "EXPUNGE"]
+        self.assertEqual(len(expurgos), secretaria.INTENTOS_MAXIMOS)
+        self.assertEqual(memoria.situacion(self.s.cx, "<17@x>"),
+                         "no_se_pudo_archivar")
+        self.assertEqual(enviar.call_count, 1)
+
+    def test_el_tope_frena_los_reintentos(self):
+        c = correo_falso("<18@x>", "Promo")
+        with mock.patch.object(secretaria, "EN_SECO", False), \
+             mock.patch.object(secretaria.correo, "traer_nuevos",
+                               return_value=[c]), \
+             mock.patch.object(secretaria.clasificador, "clasificar",
+                               return_value={"categoria": "RUIDO",
+                                             "motivo": "promo",
+                                             "unanime": True}), \
+             mock.patch.object(secretaria.correo, "mover_a",
+                               side_effect=RuntimeError("red caída")) as mover, \
+             mock.patch.object(self.s, "enviar"):
+            for _ in range(20):
+                self.s.revisar_casilla()
+        self.assertEqual(mover.call_count, secretaria.INTENTOS_MAXIMOS)
+        self.assertEqual(memoria.situacion(self.s.cx, "<18@x>"),
+                         "no_se_pudo_archivar")
+
+    def test_el_aviso_a_jp_sale_una_sola_vez(self):
+        """Veinte vueltas del ciclo, un solo mensaje: si avisara en cada
+        vuelta, JP recibiría un aviso cada 180 segundos y en dos días
+        apagaría las notificaciones -que es la manera más rápida de
+        convertir esto otra vez en una falla silenciosa."""
+        c = correo_falso("<19@x>", "Promo")
+        with mock.patch.object(secretaria, "EN_SECO", False), \
+             mock.patch.object(secretaria.correo, "traer_nuevos",
+                               return_value=[c]), \
+             mock.patch.object(secretaria.clasificador, "clasificar",
+                               return_value={"categoria": "RUIDO",
+                                             "motivo": "promo",
+                                             "unanime": True}), \
+             mock.patch.object(secretaria.correo, "mover_a",
+                               side_effect=RuntimeError("red caída")), \
+             mock.patch.object(self.s, "enviar") as enviar:
+            for _ in range(20):
+                self.s.revisar_casilla()
+        self.assertEqual(enviar.call_count, 1)
+
+    def test_el_aviso_dice_de_quien_es_de_que_se_trata_y_que_fallo(self):
+        c = correo_falso("<20@x>", "Factura de agosto",
+                         de="cobranzas@proveedor.com")
+        with mock.patch.object(secretaria, "EN_SECO", False), \
+             mock.patch.object(secretaria.correo, "traer_nuevos",
+                               return_value=[c]), \
+             mock.patch.object(secretaria.clasificador, "clasificar",
+                               return_value={"categoria": "RUIDO",
+                                             "motivo": "promo",
+                                             "unanime": True}), \
+             mock.patch.object(
+                 secretaria.correo, "mover_a",
+                 side_effect=secretaria.correo.OperacionAMedias(
+                     "cuota agotada en INBOX.Ruido")), \
+             mock.patch.object(
+                 secretaria.correo, "borrar_el_original",
+                 side_effect=secretaria.correo.OperacionAMedias(
+                     "cuota agotada en INBOX.Ruido")), \
+             mock.patch.object(self.s, "enviar") as enviar:
+            for _ in range(secretaria.INTENTOS_MAXIMOS + 3):
+                self.s.revisar_casilla()
+        texto = enviar.call_args[0][0]
+        self.assertIn("Factura de agosto", texto)
+        self.assertIn("cobranzas@proveedor.com", texto)
+        self.assertIn("OperacionAMedias", texto)
+        self.assertIn("cuota agotada", texto)
+
+    def test_mientras_no_se_agote_el_tope_sigue_reintentando(self):
+        """Un tope de 5 no puede volverse un tope de 1: una caída corta de
+        red -o el servidor IMAP reiniciándose- tiene que resolverse sola,
+        sin molestar a JP."""
+        c = correo_falso("<21@x>", "Promo")
+        fallas = [RuntimeError("red caída")] * (secretaria.INTENTOS_MAXIMOS - 1)
+        with mock.patch.object(secretaria, "EN_SECO", False), \
+             mock.patch.object(secretaria.correo, "traer_nuevos",
+                               return_value=[c]), \
+             mock.patch.object(secretaria.clasificador, "clasificar",
+                               return_value={"categoria": "RUIDO",
+                                             "motivo": "promo",
+                                             "unanime": True}), \
+             mock.patch.object(secretaria.correo, "mover_a",
+                               side_effect=fallas + [True]), \
+             mock.patch.object(self.s, "enviar") as enviar:
+            for _ in range(secretaria.INTENTOS_MAXIMOS):
+                self.s.revisar_casilla()
+        self.assertEqual(memoria.situacion(self.s.cx, "<21@x>"), "archivado")
+        enviar.assert_not_called()
+
+    def test_el_reintento_a_medias_no_vuelve_a_consultar_al_modelo(self):
+        c = correo_falso("<22@x>", "Promo")
+        fake = _IMAPFalso(copy_ok=True, store_ok=True, expunge_ok=False)
+        with mock.patch.object(secretaria, "EN_SECO", False), \
+             mock.patch.object(secretaria.correo, "abrir_buzon",
+                               return_value=fake), \
+             mock.patch.object(secretaria.correo, "traer_nuevos",
+                               return_value=[c]), \
+             mock.patch.object(secretaria.clasificador, "clasificar",
+                               return_value={"categoria": "RUIDO",
+                                             "motivo": "promo",
+                                             "unanime": True}) as cl, \
+             mock.patch.object(self.s, "enviar"):
+            for _ in range(6):
+                nuevos = self.s.revisar_casilla()
+        cl.assert_called_once()
+        self.assertEqual(nuevos, 0)
+
+    def test_si_el_borrado_del_reintento_sale_bien_queda_archivado(self):
+        """El EXPUNGE falla la primera vez (queda a medias) y anda la
+        segunda: el correo termina archivado, con UN solo COPY."""
+        c = correo_falso("<23@x>", "Promo")
+        fake = _IMAPFalso(copy_ok=True, store_ok=True, expunge_ok=False)
+        with mock.patch.object(secretaria, "EN_SECO", False), \
+             mock.patch.object(secretaria.correo, "abrir_buzon",
+                               return_value=fake), \
+             mock.patch.object(secretaria.correo, "traer_nuevos",
+                               return_value=[c]), \
+             mock.patch.object(secretaria.clasificador, "clasificar",
+                               return_value={"categoria": "RUIDO",
+                                             "motivo": "promo",
+                                             "unanime": True}), \
+             mock.patch.object(self.s, "enviar") as enviar:
+            self.s.revisar_casilla()
+            self.assertEqual(memoria.situacion(self.s.cx, "<23@x>"),
+                             "pendiente_de_borrar")
+            fake.expunge_ok = True
+            self.s.revisar_casilla()
+        self.assertEqual(memoria.situacion(self.s.cx, "<23@x>"), "archivado")
+        self.assertEqual(len([x for x in fake.comandos if x[0] == "COPY"]), 1)
+        enviar.assert_not_called()
 
 
 
