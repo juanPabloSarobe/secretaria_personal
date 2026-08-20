@@ -189,15 +189,48 @@ class MoverA(unittest.TestCase):
         """El bug real: un COPY rechazado con NO no tira excepción, así
         que sin este chequeo el código seguía con STORE +Deleted y
         EXPUNGE igual, borrando el correo sin haberlo copiado a ningún
-        lado."""
+        lado. Lo que no puede pasar -y es lo que sigue probando este
+        test- es que se borre algo. (Antes esto devolvía False; ahora
+        levanta CopiaRechazada, ver el test de abajo: el que no se
+        borre nada no cambió.)"""
         fake = _IMAPFalso(copy_ok=False)
         with mock.patch.object(correo, "abrir_buzon", return_value=fake):
-            ok = correo.mover_a("<x@y>", "INBOX.Ruido")
-        self.assertFalse(ok)
+            with self.assertRaises(correo.CopiaRechazada):
+                correo.mover_a("<x@y>", "INBOX.Ruido")
         nombres = [c[0] for c in fake.comandos]
         self.assertEqual(nombres, ["SEARCH", "COPY"])
         self.assertNotIn("STORE", nombres)
         self.assertNotIn("EXPUNGE", nombres)
+
+    def test_un_copy_rechazado_no_se_confunde_con_un_correo_que_no_esta(self):
+        """Los dos casos devolvían False y no son la misma cosa: que el
+        mensaje ya no esté en INBOX es benigno -alguien lo movió, o ya se
+        archivó- y no hay nada para reintentar ni para avisar; que el
+        servidor rechace el COPY (cuota agotada en Ruido, carpeta
+        renombrada, permisos) es una falla real que hay que reintentar y,
+        si no se arregla, contarle a JP. Leerlos igual dejaba el segundo
+        caso marcado como resuelto, sin reintento y sin aviso: un correo
+        sin archivar del que nadie se entera nunca."""
+        vacio = _IMAPFalso(uid_buscado=None)
+        with mock.patch.object(correo, "abrir_buzon", return_value=vacio):
+            self.assertIs(correo.mover_a("<no-existe@x>", "INBOX.Ruido"),
+                          False)
+
+        rechaza = _IMAPFalso(copy_ok=False)
+        with mock.patch.object(correo, "abrir_buzon", return_value=rechaza):
+            with self.assertRaises(correo.CopiaRechazada):
+                correo.mover_a("<x@y>", "INBOX.Ruido")
+
+    def test_el_error_repite_lo_que_contesto_el_servidor(self):
+        """"No se pudo copiar" no le sirve a nadie; "[TRYCREATE] no existe
+        la carpeta" o un OVERQUOTA se entienden y se arreglan. Ese texto
+        es el que termina en el aviso de Telegram."""
+        fake = _IMAPFalso(copy_ok=False)
+        with mock.patch.object(correo, "abrir_buzon", return_value=fake):
+            with self.assertRaises(correo.CopiaRechazada) as caso:
+                correo.mover_a("<x@y>", "INBOX.Ruido")
+        self.assertIn("TRYCREATE", str(caso.exception))
+        self.assertIn("INBOX.Ruido", str(caso.exception))
 
     def test_busca_por_message_id_no_por_numero(self):
         fake = _IMAPFalso()

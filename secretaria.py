@@ -197,10 +197,14 @@ class Secretaria:
             # distinta, que reintenta sólo el borrado.
             self._anotar_falla(c, e, "pendiente_de_borrar")
         except Exception as e:
-            # Cualquier otra falla (red caída, timeout, login rechazado):
-            # no sabemos si se copió algo, y mover_a con el COPY fallado
-            # no cambió nada, así que reintentar la mudanza entera es
-            # seguro.
+            # Todo lo demás -red caída, timeout, login rechazado, y
+            # correo.CopiaRechazada cuando el servidor no dejó copiar-
+            # comparte una cosa: en el destino no quedó ninguna copia, así
+            # que reintentar la mudanza entera es seguro y es lo que
+            # corresponde. CopiaRechazada entra acá a propósito y no en la
+            # rama de arriba: mandarla a "pendiente_de_borrar" haría que
+            # el reintento borre de INBOX un correo que nunca se copió a
+            # ningún lado.
             self._anotar_falla(c, e, "pendiente_de_archivar")
 
     def _terminar_de_archivar(self, c):

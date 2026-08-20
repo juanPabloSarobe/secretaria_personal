@@ -23,6 +23,45 @@ class OperacionAMedias(Exception):
     """
 
 
+class CopiaRechazada(Exception):
+    """El servidor contestó NO al COPY: no se copió nada.
+
+    Es distinta de OperacionAMedias, y la diferencia no es cosmética: acá
+    NO hay ninguna copia en el destino, así que reintentar la mudanza
+    entera es seguro y es lo correcto. Si este caso reusara
+    OperacionAMedias, el reintento llamaría a borrar_el_original() -que
+    borra de INBOX sin copiar nada, porque confía en que la copia ya
+    existe- y el correo se perdería. Por eso son dos excepciones y no
+    una: cada una dice qué quedó hecho, y de eso depende qué es seguro
+    reintentar.
+
+    Y es distinta del False que devuelve mover_a cuando el mensaje ya no
+    está en INBOX: eso es benigno -alguien lo movió, o ya se archivó- y no
+    hay nada para reintentar ni para avisar. Un COPY rechazado (cuota
+    agotada en la carpeta destino, carpeta renombrada, permisos) es una
+    falla de verdad, y leerla como el caso benigno dejaba el correo sin
+    archivar, sin reintento y sin aviso: una falla silenciosa más.
+    """
+
+
+def _motivo(respuesta):
+    """El texto con el que el servidor rechazó un comando.
+
+    Va derecho al aviso de Telegram: "no se pudo copiar" no le sirve a
+    nadie, y "[OVERQUOTA] mailbox full" o "[TRYCREATE] no existe la
+    carpeta" se entienden y se arreglan. imaplib devuelve una lista que
+    según el comando trae bytes, strings o None, así que se normaliza
+    acá adentro y nunca revienta: esto corre dentro del camino de error,
+    donde una excepción de más taparía la que importa.
+    """
+    try:
+        return " ".join(p.decode("utf-8", "replace") if isinstance(p, bytes)
+                        else str(p)
+                        for p in (respuesta or []) if p)[:200]
+    except Exception:
+        return ""
+
+
 def abrir_buzon(readonly=True):
     """Una conexión a la casilla, ya autenticada y con INBOX seleccionado.
 
@@ -223,33 +262,44 @@ def _uid_de(M, message_id):
 
 
 def mover_a(message_id, carpeta):
-    """Copia el mensaje a `carpeta` y lo borra de INBOX. False si no está.
+    """Copia el mensaje a `carpeta` y lo borra de INBOX.
+
+    Devuelve True si terminó, y False SOLO en el caso benigno: el mensaje
+    ya no está en INBOX. Todo lo que sí es una falla sale por una
+    excepción -CopiaRechazada si el servidor no dejó copiar,
+    OperacionAMedias si copió pero no pudo borrar el original- porque un
+    booleano de dos valores no alcanza para tres finales distintos, y el
+    que se caía por la rendija era justo el que había que reintentar.
 
     COPY + UID EXPUNGE porque el servidor no tiene MOVE pero sí UIDPLUS.
     Nunca EXPUNGE a secas: eso borraría otros mensajes marcados.
 
-    El `typ` de LOS TRES comandos se chequea a propósito, no sólo el del
-    COPY: `imaplib` sólo levanta excepción si el servidor contesta BAD.
-    Una respuesta NO -carpeta que no existe, cuota superada, un error
-    transitorio- vuelve en silencio. Sin chequear el COPY, un NO ahí
-    borraba un correo sin haberlo copiado a ningún lado (eso ya se
-    arregló). Pero un NO en el STORE o el EXPUNGE, DESPUÉS de un COPY que
-    sí salió bien, es otro problema: acá ya existe una copia nueva en
-    `carpeta`, así que ni devolver True (mentiría: no terminó como se
-    pidió) ni False (también mentiría: sí se copió algo) describe lo que
-    pasó. Ese caso levanta OperacionAMedias en vez de devolver nada,
-    para que quien llama no pueda tratarlo como éxito por accidente.
+    El `typ` de LOS TRES comandos se chequea a propósito: `imaplib` sólo
+    levanta excepción si el servidor contesta BAD. Una respuesta NO
+    -carpeta que no existe, cuota superada, un error transitorio- vuelve
+    en silencio. Sin chequear el COPY, un NO ahí borraba un correo sin
+    haberlo copiado a ningún lado (eso ya se arregló). Un NO en el STORE
+    o el EXPUNGE, DESPUÉS de un COPY que sí salió bien, es otro problema:
+    acá ya existe una copia nueva en `carpeta`, así que ni devolver True
+    (mentiría: no terminó como se pidió) ni False (también mentiría: sí
+    se copió algo) describe lo que pasó.
     """
     M = abrir_buzon(readonly=False)
     try:
         uid = _uid_de(M, message_id)
         if not uid:
             return False
-        typ, _ = M.uid("COPY", uid, carpeta)
+        typ, respuesta = M.uid("COPY", uid, carpeta)
         if typ != "OK":
             # Nada se copió: no hay nada que deshacer, es seguro
-            # reintentar desde cero más adelante.
-            return False
+            # reintentar la mudanza entera más adelante. Pero tampoco es
+            # un False, que acá significa "el mensaje no estaba" y quien
+            # llama lee como "listo, nada que hacer": esto es una falla
+            # del servidor -cuota, carpeta, permisos- que hay que
+            # reintentar y, si no se arregla, contarle a JP.
+            raise CopiaRechazada(
+                f"{message_id}: el servidor rechazó copiar a {carpeta}"
+                f" -- {_motivo(respuesta)}")
         typ, _ = M.uid("STORE", uid, "+FLAGS", "(\\Deleted)")
         if typ != "OK":
             raise OperacionAMedias(
