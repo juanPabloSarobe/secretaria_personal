@@ -9,6 +9,7 @@ Arranca EN SECO: clasifica y manda los resúmenes, pero no toca la casilla.
 Se le saca el freno con SECRETARIA_EN_SECO=false, y de a un paso: primero
 que archive ruido, que es reversible, y otro día que marque leído.
 """
+import html
 import os
 import sys
 import threading
@@ -134,7 +135,91 @@ class Secretaria:
                 time.sleep(5)
 
     def revisar_casilla(self):
-        raise NotImplementedError("tarea 8")
+        """Trae lo nuevo, lo clasifica, archiva el ruido y avisa lo de JP.
+
+        La regla que manda: si ningún motor respondió, el correo se le
+        muestra a JP con los botones de siempre. El silencio no es una
+        categoría, así que nunca se archiva algo que no se pudo clasificar.
+        """
+        from datetime import date, timedelta
+        entrantes = correo.traer_nuevos(date.today() - timedelta(days=1))
+        sistema = clasificador.prompt_sistema()
+        direcciones, dominios = reglas.remitentes_ruido()
+        nuevos = 0
+        for c in entrantes:
+            if memoria.situacion(self.cx, correo.identidad(c)) is not None:
+                # Ya procesado: si el proceso se cayó y volvió, no hay que
+                # avisarle a JP dos veces por el mismo correo.
+                continue
+            c["message_id"] = correo.identidad(c)
+            nuevos += 1
+            try:
+                pred = clasificador.clasificar(sistema, c)
+            except Exception as e:
+                # Ningún motor respondió. Se le muestra a JP igual: el
+                # silencio no es una categoría.
+                memoria.anotar(self.cx, c, "ERROR", f"{type(e).__name__}")
+                self.avisar_sin_clasificar(c)
+                continue
+            memoria.anotar(self.cx, c, pred["categoria"], pred.get("motivo", ""))
+            if (pred["categoria"] == "RUIDO" and pred.get("unanime")
+                    and not reglas.protegido(c)):
+                if not EN_SECO and correo.mover_a(c["message_id"], "INBOX.Ruido"):
+                    memoria.cambiar(self.cx, c["message_id"], "archivado")
+            elif pred["categoria"] in ("TUYO", "ENZO", "NATALIA"):
+                if not c.get("ya_leido"):
+                    self.avisar_en_el_momento(c, pred)
+        return nuevos
+
+    def avisar_en_el_momento(self, c, pred):
+        """El único aviso que interrumpe a JP. Son unos 4 por día.
+
+        Fuera de horario no interrumpe: el correo queda como clasificado y
+        entra en el resumen de las 8:30. La excepción son los clientes
+        importantes, que interrumpen siempre — la lista está vacía hoy, así
+        que en la práctica todavía no hay excepción.
+        """
+        import secrets
+        importante = reglas.protegido(c) and pred["categoria"] == "TUYO"
+        if not en_horario(datetime.now()) and not importante:
+            return
+        tanda = secrets.token_hex(2)
+        titulo = ("📌 Es tuyo" if pred["categoria"] == "TUYO"
+                  else f"➡️ Para derivar a {pred['categoria'].title()}")
+        texto = (f"<b>{titulo}</b> · <i>{html.escape(correo.fecha_legible(c['fecha']))}</i>\n"
+                 f"<b>De:</b> {html.escape(c['de'][:90])}\n"
+                 f"<b>CC:</b> {html.escape((c['cc'] or '(nadie)')[:90])}\n"
+                 f"<b>Asunto:</b> {html.escape(c['asunto'][:120])}\n"
+                 f"{html.escape(correo.adjuntos_legibles(c.get('adjuntos')))}\n\n"
+                 f"<pre>{html.escape((c['cuerpo'] or '')[:600])}</pre>")
+        self.enviar(texto, {"inline_keyboard": [[
+            {"text": "Listo, lo vi", "callback_data": f"v|{tanda}-1|ok"},
+            {"text": "No era mío", "callback_data": f"n|{tanda}-1|0"}]]})
+        memoria.cambiar(self.cx, c["message_id"], "avisado")
+
+    def avisar_sin_clasificar(self, c):
+        """Ningún motor respondió. Se le muestra igual, con los botones de
+        siempre: si el sistema no sabe, decide JP. Nunca se archiva."""
+        import secrets
+        tanda = secrets.token_hex(2)
+        texto = (f"<b>⚠️ No pude clasificarlo</b>\n"
+                 f"<b>De:</b> {html.escape(c['de'][:90])}\n"
+                 f"<b>Asunto:</b> {html.escape(c['asunto'][:120])}\n\n"
+                 f"<pre>{html.escape((c['cuerpo'] or '')[:600])}</pre>\n\n"
+                 f"¿Qué correspondía?")
+        self.enviar(texto, bot.teclado(1, tanda))
+
+    def enviar(self, texto, teclado=None):
+        """Manda a Telegram. Una falla acá no puede matar el proceso."""
+        try:
+            return bot.tg("sendMessage", chat_id=os.environ["TELEGRAM_CHAT_ID"],
+                          text=texto, parse_mode="HTML",
+                          reply_markup=teclado) if teclado else \
+                   bot.tg("sendMessage", chat_id=os.environ["TELEGRAM_CHAT_ID"],
+                          text=texto, parse_mode="HTML")
+        except Exception as e:
+            print(f"[telegram] no pude enviar: {type(e).__name__}: {e}", flush=True)
+            return None
 
     def mandar_resumen(self, momento):
         raise NotImplementedError("tarea 9")

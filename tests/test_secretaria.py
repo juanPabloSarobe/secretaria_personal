@@ -1,10 +1,19 @@
+import tempfile
 import threading
 import time
 import unittest
+import unittest.mock as mock
 from datetime import datetime
 from unittest.mock import patch
 
+import memoria
 import secretaria
+
+
+def correo_falso(mid, asunto, de="promo@ejemplo.com"):
+    return {"message_id": mid, "uid": "1", "de": de, "para": "jp@x", "cc": "",
+            "asunto": asunto, "fecha": "Mon, 17 Aug 2026 09:00:00 -0300",
+            "cuerpo": "cuerpo", "adjuntos": []}
 
 
 class _CxMuda:
@@ -277,6 +286,61 @@ class ArrancarVigilaLosHilos(unittest.TestCase):
         # arrancar() tiene que haber pedido la parada: un hilo bien
         # comportado como escucha_viva se entera y no queda huérfano.
         self.assertTrue(s.parada.is_set())
+
+
+class RevisarCasilla(unittest.TestCase):
+    def setUp(self):
+        self.f = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.s = secretaria.Secretaria(cx=memoria.abrir(self.f.name))
+
+    def test_lo_sin_clasificar_nunca_se_archiva(self):
+        """Si no respondió ningún motor, el correo se le muestra a JP. El
+        silencio jamás significa 'era ruido'."""
+        with mock.patch.object(secretaria.correo, "traer_nuevos",
+                               return_value=[correo_falso("<1@x>", "Algo")]), \
+             mock.patch.object(secretaria.clasificador, "clasificar",
+                               side_effect=RuntimeError("sin motores")), \
+             mock.patch.object(secretaria.correo, "mover_a") as mover:
+            self.s.revisar_casilla()
+        mover.assert_not_called()
+        self.assertEqual(memoria.situacion(self.s.cx, "<1@x>"),
+                         "mostrado_sin_clasificar")
+
+    def test_en_seco_no_toca_la_casilla(self):
+        with mock.patch.object(secretaria, "EN_SECO", True), \
+             mock.patch.object(secretaria.correo, "traer_nuevos",
+                               return_value=[correo_falso("<2@x>", "Promo")]), \
+             mock.patch.object(secretaria.clasificador, "clasificar",
+                               return_value={"categoria": "RUIDO",
+                                             "motivo": "promo",
+                                             "unanime": True}), \
+             mock.patch.object(secretaria.correo, "mover_a") as mover:
+            self.s.revisar_casilla()
+        mover.assert_not_called()
+
+    def test_con_el_freno_sacado_el_ruido_se_archiva(self):
+        with mock.patch.object(secretaria, "EN_SECO", False), \
+             mock.patch.object(secretaria.correo, "traer_nuevos",
+                               return_value=[correo_falso("<3@x>", "Promo")]), \
+             mock.patch.object(secretaria.clasificador, "clasificar",
+                               return_value={"categoria": "RUIDO",
+                                             "motivo": "promo",
+                                             "unanime": True}), \
+             mock.patch.object(secretaria.correo, "mover_a",
+                               return_value=True) as mover:
+            self.s.revisar_casilla()
+        mover.assert_called_once_with("<3@x>", "INBOX.Ruido")
+        self.assertEqual(memoria.situacion(self.s.cx, "<3@x>"), "archivado")
+
+    def test_un_correo_ya_procesado_no_se_reprocesa(self):
+        c = correo_falso("<4@x>", "Repetido")
+        with mock.patch.object(secretaria.correo, "traer_nuevos",
+                               return_value=[c, c]), \
+             mock.patch.object(secretaria.clasificador, "clasificar",
+                               return_value={"categoria": "TUYO",
+                                             "motivo": "m", "unanime": True}) as cl:
+            self.s.revisar_casilla()
+        self.assertEqual(cl.call_count, 1)
 
 
 if __name__ == "__main__":

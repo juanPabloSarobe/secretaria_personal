@@ -19,8 +19,8 @@ from bot import (CATEGORIAS, UA, es_de_esta_tanda, teclado,  # noqa: F401
 from clasificador import (ESPERA_MAXIMA, ESPERA_RESPUESTA, clasificar,  # noqa: F401
                           clasificar_una_vez, motores, prompt_sistema)
 from correo import (TIPOS_ADJUNTO, MESES_IMAP, abrir_buzon, adjuntos,  # noqa: F401
-                    adjuntos_legibles, completar_adjuntos, identidad,
-                    texto_plano, traer_correos)
+                    adjuntos_legibles, completar_adjuntos, fecha_legible,
+                    identidad, texto_plano, traer_correos)
 from reglas import (DOMINIOS_GENERICOS, MARCAS_PARA_AUTOMATIZAR,  # noqa: F401
                     MUESTREO_CONTROL, codigos_convenidos, direcciones_externas,
                     es_ruido_conocido, marcar_importante, protegido,
@@ -210,37 +210,9 @@ def recortar(s, n):
     return s if len(s) <= n else s[:n].rstrip() + "…"
 
 
-DIAS = ["lun", "mar", "mié", "jue", "vie", "sáb", "dom"]
-MESES = ["ene", "feb", "mar", "abr", "may", "jun",
-         "jul", "ago", "sep", "oct", "nov", "dic"]
-
-
-def fecha_legible(cabecera):
-    """Fecha del correo en criollo, con la antigüedad al lado.
-
-    Sin esto no se distingue un correo de hoy de uno de la semana pasada, ni
-    un reenvío de un pedido nuevo: JP se topó con un correo del jueves anterior
-    sin ninguna forma de saberlo.
-    """
-    try:
-        d = email.utils.parsedate_to_datetime(cabecera)
-    except Exception:
-        return cabecera[:30] if cabecera else "(sin fecha)"
-    if d.tzinfo is None:
-        d = d.replace(tzinfo=timezone.utc)
-
-    dias = (datetime.now(timezone.utc) - d).days
-    if dias <= 0:
-        antiguedad = "hoy"
-    elif dias == 1:
-        antiguedad = "ayer"
-    elif dias < 7:
-        antiguedad = f"hace {dias} días"
-    else:
-        antiguedad = f"hace {dias // 7} semana{'s' if dias >= 14 else ''}"
-
-    return (f"{DIAS[d.weekday()]} {d.day} {MESES[d.month - 1]} "
-            f"{d.strftime('%H:%M')} · {antiguedad}")
+# fecha_legible se mudó a correo.py (tarea 8): avisar_en_el_momento la
+# necesita en secretaria.py, y no tenía sentido que un módulo del proceso
+# real importara desde el script de simulacro.
 
 
 def valor_didactico(correo):

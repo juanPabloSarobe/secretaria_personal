@@ -7,6 +7,7 @@ estaba, y se busca por Message-ID y nunca por número de secuencia, porque
 el número cambia en cuanto se archiva algo.
 """
 import email, email.policy, email.utils, hashlib, html, imaplib, os, re
+from datetime import datetime, timezone
 
 
 def abrir_buzon(readonly=True):
@@ -195,3 +196,139 @@ def completar_adjuntos(correos):
     print(f"  {con} con adjuntos, {len(faltan) - con - sin} sin, "
           f"{sin} que ya no están en la bandeja", flush=True)
     return correos
+
+
+def _uid_de(M, message_id):
+    """El UID actual de un mensaje, buscado por Message-ID.
+
+    Nunca por número de secuencia: el número cambia en cuanto se archiva o
+    se borra algo, y para entonces apunta a otro correo.
+    """
+    typ, d = M.uid("SEARCH", None, "HEADER", "Message-ID", f'"{message_id}"')
+    uids = d[0].split()
+    return uids[-1] if uids else None
+
+
+def mover_a(message_id, carpeta):
+    """Copia el mensaje a `carpeta` y lo borra de INBOX. False si no está.
+
+    COPY + UID EXPUNGE porque el servidor no tiene MOVE pero sí UIDPLUS.
+    Nunca EXPUNGE a secas: eso borraría otros mensajes marcados.
+    """
+    M = abrir_buzon(readonly=False)
+    try:
+        uid = _uid_de(M, message_id)
+        if not uid:
+            return False
+        M.uid("COPY", uid, carpeta)
+        M.uid("STORE", uid, "+FLAGS", "(\\Deleted)")
+        M.uid("EXPUNGE", uid)
+        return True
+    finally:
+        M.logout()
+
+
+def marcar_leido(message_id):
+    """Marca un mensaje como leído sin tocar ninguna otra cosa."""
+    M = abrir_buzon(readonly=False)
+    try:
+        uid = _uid_de(M, message_id)
+        if not uid:
+            return False
+        M.uid("STORE", uid, "+FLAGS", "(\\Seen)")
+        return True
+    finally:
+        M.logout()
+
+
+def devolver_a_bandeja(message_id):
+    """Saca un mensaje de INBOX.Ruido y lo deja en INBOX SIN LEER.
+
+    Sin leer a propósito: si JP dice que no era ruido, tiene que
+    encontrarlo como encontraría cualquier correo que no vio.
+    """
+    M = imaplib.IMAP4_SSL(os.environ["IMAP_HOST"],
+                          int(os.environ["IMAP_PORT"]), timeout=40)
+    M.login(os.environ["IMAP_USER"], os.environ["IMAP_PASSWORD"])
+    try:
+        M.select("INBOX.Ruido", readonly=False)
+        uid = _uid_de(M, message_id)
+        if not uid:
+            return False
+        M.uid("COPY", uid, "INBOX")
+        M.uid("STORE", uid, "+FLAGS", "(\\Deleted)")
+        M.uid("EXPUNGE", uid)
+        M.select("INBOX", readonly=False)
+        nuevo = _uid_de(M, message_id)
+        if nuevo:
+            M.uid("STORE", nuevo, "-FLAGS", "(\\Seen)")
+        return True
+    finally:
+        M.logout()
+
+
+def traer_nuevos(desde_fecha):
+    """Los correos recibidos desde una fecha, con marca de si vienen leídos.
+
+    `ya_leido` importa: si JP lo abrió del celular antes de que la
+    secretaria lo mire, no hay que interrumpirlo con algo que ya vio.
+    """
+    M = abrir_buzon(readonly=True)
+    try:
+        criterio = (f"{desde_fecha.day:02d}-{MESES_IMAP[desde_fecha.month - 1]}"
+                    f"-{desde_fecha.year}")
+        typ, d = M.uid("SEARCH", None, "SINCE", criterio)
+        salida = []
+        for uid in d[0].split():
+            typ, dd = M.uid("FETCH", uid, "(FLAGS BODY.PEEK[])")
+            crudo = dd[0][1]
+            banderas = str(dd[0][0])
+            msg = email.message_from_bytes(crudo, policy=email.policy.default)
+            salida.append({
+                "uid": uid.decode(),
+                "de": str(msg.get("From", ""))[:200],
+                "para": str(msg.get("To", ""))[:300],
+                "cc": str(msg.get("Cc", ""))[:300],
+                "asunto": str(msg.get("Subject", "(sin asunto)"))[:200],
+                "fecha": str(msg.get("Date", "")),
+                "message_id": str(msg.get("Message-ID", "")),
+                "cuerpo": texto_plano(msg)[:4000],
+                "adjuntos": adjuntos(msg),
+                "ya_leido": "\\Seen" in banderas,
+            })
+        return salida
+    finally:
+        M.logout()
+
+
+DIAS = ["lun", "mar", "mié", "jue", "vie", "sáb", "dom"]
+MESES = ["ene", "feb", "mar", "abr", "may", "jun",
+         "jul", "ago", "sep", "oct", "nov", "dic"]
+
+
+def fecha_legible(cabecera):
+    """Fecha del correo en criollo, con la antigüedad al lado.
+
+    Sin esto no se distingue un correo de hoy de uno de la semana pasada, ni
+    un reenvío de un pedido nuevo: JP se topó con un correo del jueves anterior
+    sin ninguna forma de saberlo.
+    """
+    try:
+        d = email.utils.parsedate_to_datetime(cabecera)
+    except Exception:
+        return cabecera[:30] if cabecera else "(sin fecha)"
+    if d.tzinfo is None:
+        d = d.replace(tzinfo=timezone.utc)
+
+    dias = (datetime.now(timezone.utc) - d).days
+    if dias <= 0:
+        antiguedad = "hoy"
+    elif dias == 1:
+        antiguedad = "ayer"
+    elif dias < 7:
+        antiguedad = f"hace {dias} días"
+    else:
+        antiguedad = f"hace {dias // 7} semana{'s' if dias >= 14 else ''}"
+
+    return (f"{DIAS[d.weekday()]} {d.day} {MESES[d.month - 1]} "
+            f"{d.strftime('%H:%M')} · {antiguedad}")
