@@ -156,13 +156,14 @@ class Volumen(unittest.TestCase):
                           f"se recortó algo accionable: {c['asunto']!r}")
 
 
-class MandarResumenPorLotes(unittest.TestCase):
-    """El caso extremo: ni colapsando el equipo entra en un solo mensaje
+class MandarResumenCaminoGrande(unittest.TestCase):
+    """Ronda 2: el caso en que ni lo accionable solo entra en un mensaje
     -en la práctica hace falta un LIMITE_TELEGRAM chico a propósito para
-    provocarlo en un test, porque el colapso normal ya absorbe cualquier
-    volumen de equipo-. Ahí mandar_resumen tiene que partir en varios
-    mensajes y marcar cada lote como hecho recién cuando ESE lote salió
-    de verdad."""
+    provocarlo con pocos correos, porque en volumen real hacen falta
+    muchos accionables para que esto se active-. Ahí mandar_resumen
+    trocea SOLO lo accionable (nunca mezcla equipo/ruido en los lotes de
+    detalle, esa mezcla era el bug de la ronda 1) y marca cada lote
+    recién cuando ESE lote salió de verdad."""
 
     def setUp(self):
         f = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
@@ -171,39 +172,136 @@ class MandarResumenPorLotes(unittest.TestCase):
             memoria.anotar(self.s.cx, correo_falso(f"<m{i}@x>", f"Mío {i}"),
                            "TUYO", "m")
 
-    def test_manda_varios_mensajes_y_marca_todo_si_todos_salen(self):
-        with mock.patch.object(secretaria, "LIMITE_TELEGRAM", 400), \
-             mock.patch.object(secretaria, "TAMANO_LOTE_RESUMEN", 5), \
+    def test_manda_como_mucho_el_tope_y_marca_lo_que_entro(self):
+        correos_antes = memoria.del_dia(self.s.cx, "clasificado", "")
+        with mock.patch.object(secretaria, "LIMITE_TELEGRAM", 300), \
              mock.patch.object(self.s, "enviar",
                                return_value={"ok": True}) as enviar:
+            lotes, sobran = self.s._empacar_accionable(
+                correos_antes, secretaria.TOPE_MENSAJES - 1)
             self.s.mandar_resumen("manana")
 
-        self.assertGreater(enviar.call_count, 1)
-        for i in range(40):
-            self.assertEqual(memoria.situacion(self.s.cx, f"<m{i}@x>"),
-                             "en_resumen")
-
-    def test_si_un_lote_falla_ni_ese_ni_los_siguientes_quedan_marcados(self):
-        """Nunca se marca como enviado algo que no salió: si Telegram se
-        cae a mitad de la tanda, ni el lote que falló ni los que
-        vendrían después se dan por vistos -se reintentan enteros la
-        próxima vez-, pero los que ya habían salido antes de la falla
-        quedan marcados, porque esos JP los vio de verdad."""
-        salidas = [{"ok": True}, {"ok": True}, None, {"ok": True}]
-        with mock.patch.object(secretaria, "LIMITE_TELEGRAM", 400), \
-             mock.patch.object(secretaria, "TAMANO_LOTE_RESUMEN", 5), \
-             mock.patch.object(self.s, "enviar", side_effect=salidas):
-            self.s.mandar_resumen("manana")
-
-        # Los primeros dos lotes (10 correos) salieron: marcados.
-        for i in range(10):
-            self.assertEqual(memoria.situacion(self.s.cx, f"<m{i}@x>"),
-                             "en_resumen")
-        # El tercer lote falló, y nada después de él se intentó ni se
-        # marcó: sigue "clasificado", listo para el próximo resumen.
-        for i in range(10, 40):
-            self.assertEqual(memoria.situacion(self.s.cx, f"<m{i}@x>"),
+        # Se ejercita de verdad el camino grande: hay lotes de detalle
+        # Y sobrante -si no, el test no probaría nada nuevo.
+        self.assertGreater(len(lotes), 0)
+        self.assertGreater(len(sobran), 0)
+        self.assertLessEqual(enviar.call_count, secretaria.TOPE_MENSAJES)
+        for lote in lotes:
+            for c in lote:
+                self.assertEqual(memoria.situacion(self.s.cx, c["message_id"]),
+                                 "en_resumen")
+        # Lo que no entró en el detalle queda "clasificado": vuelve
+        # completo -no como conteo- en el próximo resumen.
+        for c in sobran:
+            self.assertEqual(memoria.situacion(self.s.cx, c["message_id"]),
                              "clasificado")
+
+    def test_si_un_lote_de_detalle_falla_no_se_manda_el_cierre_ni_se_marca_nada_despues(self):
+        """Nunca se marca como enviado algo que no salió: si Telegram se
+        cae a mitad de la tanda, ni el lote que falló, ni los que
+        vendrían después, ni el cierre se dan por vistos -se reintenta
+        todo entero la próxima vez-, pero lo que ya había salido antes
+        de la falla queda marcado, porque eso JP lo vio de verdad."""
+        correos_antes = memoria.del_dia(self.s.cx, "clasificado", "")
+        with mock.patch.object(secretaria, "LIMITE_TELEGRAM", 300), \
+             mock.patch.object(secretaria, "TOPE_MENSAJES", 4):
+            lotes, sobran = self.s._empacar_accionable(
+                correos_antes, secretaria.TOPE_MENSAJES - 1)
+            self.assertGreaterEqual(len(lotes), 2,
+                                    "hace falta 2+ lotes para probar la"
+                                    " falla a mitad de camino")
+            salidas = [{"ok": True}, None] + [{"ok": True}] * 10
+            with mock.patch.object(self.s, "enviar", side_effect=salidas) as enviar:
+                self.s.mandar_resumen("manana")
+
+        self.assertEqual(enviar.call_count, 2)  # el 2do lote falla, ahí se corta
+        for c in lotes[0]:
+            self.assertEqual(memoria.situacion(self.s.cx, c["message_id"]),
+                             "en_resumen")
+        for c in lotes[1] + sobran:
+            self.assertEqual(memoria.situacion(self.s.cx, c["message_id"]),
+                             "clasificado")
+
+
+class LaAndanadaDeLaRonda2(unittest.TestCase):
+    """Los números tal cual los midió el revisor: 1000 correos, 70 de
+    ellos accionables, mezclados con el resto entre equipo y ruido.
+    Antes de este arreglo, partir todo en lotes parejos de 15 -sin
+    distinguir categorías- mandaba 67 mensajes de una sola tanda. Ahora
+    el troceo respeta la jerarquía: lo accionable primero y completo, el
+    resto -que es el grueso, y no necesita revisión uno por uno- nunca
+    se enumera en este camino, sólo se cuenta."""
+
+    def setUp(self):
+        f = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.s = secretaria.Secretaria(cx=memoria.abrir(f.name))
+        # Asuntos largos a propósito -del orden de un asunto real, no
+        # "Mío 3"-: con asuntos cortos 70 accionables pueden entrar en
+        # un solo mensaje sin necesidad del camino grande, y este test
+        # existe justamente para ejercitarlo.
+        # El asunto tiene que entrar entero en los 48 caracteres que la
+        # línea de "Tuyo" no recorta, si no el número que lo distingue
+        # queda afuera del texto y el test no puede contarlo (ver el
+        # mismo ajuste en Volumen._equipo). Es largo -no "Mío 3"- a
+        # propósito: con asuntos cortos, 70 accionables entran en un
+        # solo mensaje sin necesidad del camino grande, y este test
+        # existe para ejercitarlo.
+        for i in range(70):
+            memoria.anotar(self.s.cx, correo_falso(
+                f"<a{i}@x>",
+                f"Consulta sobre facturación cliente {i:03d}"), "TUYO", "m")
+        for i in range(900):
+            memoria.anotar(self.s.cx, correo_falso(f"<e{i}@x>", f"Equipo {i}"),
+                           "DELEGADO", "m")
+        for i in range(30):
+            memoria.anotar(self.s.cx, correo_falso(f"<r{i}@x>", f"Ruido {i}"),
+                           "RUIDO", "m")
+            memoria.cambiar(self.s.cx, f"<r{i}@x>", "archivado")
+
+    def _mandar_y_juntar_textos(self):
+        enviados = []
+
+        def enviar_falso(texto, teclado=None):
+            enviados.append(texto)
+            return {"ok": True}
+
+        with mock.patch.object(self.s, "enviar", side_effect=enviar_falso) as enviar:
+            self.s.mandar_resumen("manana")
+        return enviados, enviar
+
+    def test_1000_correos_con_70_accionables_no_superan_el_tope(self):
+        enviados, enviar = self._mandar_y_juntar_textos()
+        self.assertLessEqual(enviar.call_count, secretaria.TOPE_MENSAJES)
+        self.assertGreaterEqual(enviar.call_count, 1)
+
+    def test_lo_accionable_llega_completo_en_el_detalle(self):
+        """Con estos números entra completo -70 asuntos largos siguen
+        siendo pocos comparados con 900 correos de equipo-, así que ni
+        siquiera hace falta diferir ninguno: el tope se respeta y todo
+        lo accionable se ve igual."""
+        enviados, _ = self._mandar_y_juntar_textos()
+        texto_junto = "\n".join(enviados)
+        for i in range(70):
+            self.assertIn(f"cliente {i:03d}", texto_junto,
+                          f"el accionable {i} no llegó completo")
+
+    def test_el_equipo_y_el_ruido_nunca_se_enumeran_en_el_camino_grande(self):
+        enviados, _ = self._mandar_y_juntar_textos()
+        texto_junto = "\n".join(enviados)
+        self.assertNotIn("Equipo 0", texto_junto)
+        self.assertNotIn("Ruido 0", texto_junto)
+        # pero el conteo sí tiene que estar, si no es un recorte callado
+        self.assertIn("900", texto_junto)
+        self.assertIn("30", texto_junto)
+
+    def test_lo_que_se_muestra_completo_queda_marcado(self):
+        self._mandar_y_juntar_textos()
+        for i in range(70):
+            self.assertEqual(memoria.situacion(self.s.cx, f"<a{i}@x>"),
+                             "en_resumen")
+        for i in range(900):
+            self.assertEqual(memoria.situacion(self.s.cx, f"<e{i}@x>"),
+                             "en_resumen")
 
 
 if __name__ == "__main__":

@@ -43,12 +43,23 @@ MOMENTOS = [("manana", 8, 30), ("tarde", 17, 0), ("ruido", 18, 0)]
 # y lo rechaza entero: no es un mensaje recortado, es CERO mensaje.
 LIMITE_TELEGRAM = 4096
 
-# Cuántos correos entran, sobrando margen de sobra, en un solo mensaje de
-# resumen. Sólo se usa si ni colapsando el bloque del equipo (ver
-# armar_resumen) el resumen entra en un mensaje -lo de JP y lo para
-# derivar nunca se recortan, así que ese es el único caso en que hace
-# falta partir en varios.
-TAMANO_LOTE_RESUMEN = 15
+# Overhead reservado -título del bloque del equipo y el aviso de cuántos
+# quedaron sin listar, ver armar_resumen()- para decidir si lo accionable
+# solo ya entra en un mensaje sin tener que armar el resumen completo
+# para medirlo. No depende del volumen de equipo: el título y el aviso
+# tienen un tamaño acotado, aunque haya miles de correos del equipo.
+MARGEN_COLAPSO_EQUIPO = 300
+
+# Tope duro de mensajes de Telegram por tanda de resumen. Ronda 2: con
+# 1000 correos y 70 accionables, partir todo en lotes parejos de 15
+# mandaba 67 mensajes de una -la misma andanada que este número existe
+# para evitar, justo en el momento -la vuelta después de una caída
+# larga- en que es más probable que pase. Con 3 entran cómodos dos
+# mensajes de detalle de lo accionable -que en la práctica son decenas
+# de correos cada uno, ver _empacar_accionable- más un cierre con los
+# conteos de lo que no entró. JP prefiere tres mensajes y saber cuánto
+# hay, a que le lleguen cuarenta y no lea ninguno.
+TOPE_MENSAJES = 3
 
 
 def en_horario(momento):
@@ -552,6 +563,31 @@ class Secretaria:
     SALUDO = {"manana": "Buen día.", "tarde": "Cierre del día.",
               "ruido": "Lo que archivé hoy."}
 
+    def _linea_accionable(self, c):
+        """Una línea de "Tuyo" o "Para derivar", según la categoría.
+
+        Factorizada de armar_resumen para poder reusarla en el camino de
+        mucho volumen (_empacar_accionable) sin duplicar el formato: que
+        las dos rutas dibujen el mismo correo distinto sería un bug
+        esperando pasar."""
+        if c["categoria"] == "TUYO":
+            return (f"  · {html.escape(c['de'][:34])} — "
+                   f"{html.escape(c['asunto'][:48])}")
+        return (f"  · {html.escape(c['asunto'][:44])} → "
+               f"{c['categoria'].title()}")
+
+    def _lineas_mios_derivar(self, mios, derivar):
+        """El bloque de lo accionable -título con conteo más una línea
+        por correo-. Nunca se recorta: es poco y es lo que importa."""
+        lineas = []
+        if mios:
+            lineas.append(f"\n📌 <b>Tuyo ({len(mios)})</b>")
+            lineas += [self._linea_accionable(c) for c in mios]
+        if derivar:
+            lineas.append(f"\n➡️ <b>Para derivar ({len(derivar)})</b>")
+            lineas += [self._linea_accionable(c) for c in derivar]
+        return lineas
+
     def armar_resumen(self, correos, momento):
         """El texto y los botones de un resumen.
 
@@ -573,6 +609,13 @@ class Secretaria:
         ("El equipo lo maneja (N)") sigue siendo el total real aunque no
         se listen todas, así que nada quedó afuera del resumen en sí:
         sólo de la lista de nombres.
+
+        Esta función asume que lo accionable solo ya entra en un
+        mensaje -es responsabilidad de quien llama (mandar_resumen)
+        decidir eso ANTES de llamarla, sin invocarla "a ver si entra":
+        cada llamada acá arma una tanda nueva en self.abiertos, y una
+        tanda armada y descartada es un botón fantasma que no
+        corresponde a ningún mensaje real (ronda 2, hallazgo menor).
         """
         import secrets
         tanda = secrets.token_hex(2)
@@ -589,15 +632,8 @@ class Secretaria:
             return (f"{self.SALUDO[momento]} No entró nada nuevo.",
                     {"inline_keyboard": []})
 
-        cabecera = [f"{self.SALUDO[momento]} Entraron {len(correos)} correos."]
-        if mios:
-            cabecera.append(f"\n📌 <b>Tuyo ({len(mios)})</b>")
-            cabecera += [f"  · {html.escape(c['de'][:34])} — "
-                        f"{html.escape(c['asunto'][:48])}" for c in mios]
-        if derivar:
-            cabecera.append(f"\n➡️ <b>Para derivar ({len(derivar)})</b>")
-            cabecera += [f"  · {html.escape(c['asunto'][:44])} → "
-                        f"{c['categoria'].title()}" for c in derivar]
+        cabecera = ([f"{self.SALUDO[momento]} Entraron {len(correos)} correos."]
+                   + self._lineas_mios_derivar(mios, derivar))
         pie = [f"\n🗑 Archivado como ruido: {len(ruido)}"] if ruido else []
 
         titulo_equipo = (f"\n✅ <b>El equipo lo maneja ({len(equipo)})</b>"
@@ -641,6 +677,115 @@ class Secretaria:
         self.abiertos[tanda] = [c["message_id"] for c in equipo]
         return texto, {"inline_keyboard": filas}
 
+    def _cabria_en_un_mensaje(self, correos, momento):
+        """¿Entra lo accionable solo -lo que armar_resumen nunca
+        recorta- en un mensaje, sumado al margen fijo que se reserva
+        para el colapso del equipo?
+
+        Se calcula sin llamar a armar_resumen(): esa función arma una
+        tanda nueva en self.abiertos por cada llamada, así que usarla
+        "para medir" y después descartar el resultado deja un token
+        fantasma con un botón que no corresponde a ningún mensaje real
+        -el hallazgo menor de la ronda 2-. Esta cuenta es una
+        aproximación conservadora (MARGEN_COLAPSO_EQUIPO de sobra para
+        el título y el aviso de corte, que no dependen del volumen de
+        equipo), no un armado exacto: si por algún borde se queda corta,
+        el peor caso es un mensaje que Telegram rechaza y que se
+        reintenta entero la próxima vuelta -no una pérdida.
+        """
+        mios = [c for c in correos if c["categoria"] == "TUYO"]
+        derivar = [c for c in correos if c["categoria"] in ("ENZO", "NATALIA")]
+        saludo = f"{self.SALUDO[momento]} Entraron {len(correos)} correos."
+        largo = len(saludo) + sum(
+            len(l) + 1 for l in self._lineas_mios_derivar(mios, derivar))
+        return largo + MARGEN_COLAPSO_EQUIPO <= LIMITE_TELEGRAM
+
+    def _empacar_accionable(self, accionable, cupo):
+        """Parte lo accionable en como mucho `cupo` mensajes que entren
+        en el límite de Telegram, preservando el orden -lo de JP antes
+        que lo para derivar, como en el resto del resumen-.
+
+        Devuelve (lotes, sobran): `sobran` es lo que no entró ni
+        agotando `cupo` mensajes -se queda "clasificado" en la base para
+        que el próximo resumen lo vuelva a mostrar entero, nunca se da
+        por contado sin que JP lo haya visto de verdad."""
+        lotes = []
+        i, n = 0, len(accionable)
+        while i < n and len(lotes) < cupo:
+            largo = 120  # margen para el saludo y los títulos de sección
+            j = i
+            while j < n:
+                extra = len(self._linea_accionable(accionable[j])) + 1
+                if largo + extra > LIMITE_TELEGRAM:
+                    break
+                largo += extra
+                j += 1
+            j = max(j, i + 1)  # un solo ítem que ya excede: se manda igual
+            lotes.append(accionable[i:j])
+            i = j
+        return lotes, accionable[i:]
+
+    def _texto_cierre_grande(self, sobran, equipo, ruido):
+        """El mensaje final del camino de mucho volumen: nunca enumera
+        equipo ni ruido -eso sería volver a mezclar el grueso con lo
+        accionable, el problema que este camino existe para evitar-,
+        sólo cuenta. Lo accionable que no entró en el detalle también se
+        cuenta acá, pero no se marca "en_resumen": queda pendiente para
+        volver completo, con nombre y asunto, en el próximo resumen."""
+        lineas = ["Eso es lo que entra acá. Además:"]
+        if sobran:
+            lineas.append(f"  · {len(sobran)} tuyos o para derivar más "
+                          f"-completos en el próximo resumen-.")
+        if equipo:
+            lineas.append(f"  ✅ El equipo maneja {len(equipo)} más.")
+        if ruido:
+            lineas.append(f"  🗑 Se archivaron {len(ruido)} como ruido.")
+        lineas.append("\nPara verlos ahora, entrá directo a la casilla.")
+        return "\n".join(lineas)
+
+    def _mandar_resumen_grande(self, momento, mios, derivar, equipo, ruido):
+        """El camino de mucho volumen: ni lo accionable solo entra en un
+        mensaje. Se manda en varios, respetando la jerarquía -lo
+        accionable primero y completo, el equipo y el ruido nunca se
+        enumeran acá, sólo se cuentan- y con TOPE_MENSAJES como cota
+        dura: la vuelta después de una caída larga es exactamente el
+        momento en que más atraso hay, y es cuando menos sentido tiene
+        mandar una andanada.
+
+        Ningún mensaje de acá lleva botones -no enumeran equipo, así que
+        no hay nada que "Leí todo" pueda cerrar- y por lo tanto no arma
+        tandas en self.abiertos: nada fantasma que limpiar.
+        """
+        accionable = mios + derivar
+        cupo_detalle = TOPE_MENSAJES - 1  # uno se reserva para el cierre
+        lotes, sobran = self._empacar_accionable(accionable, cupo_detalle)
+
+        for n, lote in enumerate(lotes, 1):
+            mios_l = [c for c in lote if c["categoria"] == "TUYO"]
+            derivar_l = [c for c in lote if c["categoria"] in ("ENZO", "NATALIA")]
+            cabecera = [f"{self.SALUDO[momento]} Volviste con "
+                       f"{len(accionable)} correos tuyos o para derivar "
+                       f"esperando (parte {n}/{len(lotes) + 1})."]
+            texto = "\n".join(cabecera + self._lineas_mios_derivar(mios_l, derivar_l))
+            if not self.enviar(texto):
+                # Este lote no salió: ni éste ni el cierre se mandan, y
+                # nada de acá se marca -se reintenta entero la próxima
+                # vez, en vez de dar por visto algo que Telegram nunca
+                # entregó.
+                return
+            memoria.cambiar_lote(self.cx, [c["message_id"] for c in lote],
+                                 "en_resumen")
+
+        texto_cierre = self._texto_cierre_grande(sobran, equipo, ruido)
+        if self.enviar(texto_cierre):
+            # El equipo y el ruido se marcan igual que en el camino
+            # normal (ronda 1): el conteo del cierre es exacto aunque no
+            # se hayan listado, y no necesitan revisión uno por uno. Lo
+            # accionable sobrante NO se marca -queda "clasificado" para
+            # volver completo la próxima vez.
+            memoria.cambiar_lote(self.cx, [c["message_id"] for c in equipo + ruido],
+                                 "en_resumen")
+
     def mandar_resumen(self, momento):
         """Junta lo pendiente de resumir y lo manda por Telegram.
 
@@ -658,19 +803,22 @@ class Secretaria:
 
         Normalmente un solo mensaje alcanza -armar_resumen ya colapsa el
         bloque del equipo así que no crece sin límite con el volumen-.
-        Sólo si ni así entra -lo de JP y lo para derivar, que nunca se
-        recortan, son tantos que igual desbordan- se parte en varios
-        mensajes. Cada lote se marca "en_resumen" recién cuando SU envío
-        confirma, y si uno falla no se manda el siguiente: mejor que el
-        próximo resumen repita un lote entero a que dé por visto algo
-        que Telegram nunca entregó.
+        La decisión de si alcanza se toma ANTES de armar ese mensaje
+        (_cabria_en_un_mensaje), no probando y descartando: ver el
+        docstring de armar_resumen sobre por qué. Sólo si ni lo
+        accionable solo entra se pasa al camino de mucho volumen
+        (_mandar_resumen_grande), que trocea respetando la jerarquía en
+        vez de partir la lista entera en lotes parejos -la ronda 1
+        mandaba 67 mensajes con 1000 correos y 70 accionables porque
+        troceaba todo junto, sin distinguir lo accionable del grueso.
         """
         correos = (memoria.del_dia(self.cx, "clasificado", "") +
                    memoria.del_dia(self.cx, "archivado", ""))
-        texto, teclado = self.armar_resumen(correos, momento)
-        if len(texto) <= LIMITE_TELEGRAM:
+
+        if not correos or self._cabria_en_un_mensaje(correos, momento):
+            texto, teclado = self.armar_resumen(correos, momento)
             resultado = self.enviar(texto, teclado)
-            if resultado:
+            if resultado and correos:
                 # Una sola transacción para todo el lote: con un commit
                 # por correo, morir a mitad de camino deja marcados sólo
                 # algunos aunque el mensaje entero ya salió y JP ya lo
@@ -680,20 +828,11 @@ class Secretaria:
                                      "en_resumen")
             return
 
-        lotes = [correos[i:i + TAMANO_LOTE_RESUMEN]
-                for i in range(0, len(correos), TAMANO_LOTE_RESUMEN)]
-        for n, lote in enumerate(lotes, 1):
-            texto, teclado = self.armar_resumen(lote, momento)
-            if len(lotes) > 1:
-                texto = f"{texto}\n\n(parte {n}/{len(lotes)})"
-            resultado = self.enviar(texto, teclado)
-            if not resultado:
-                # Este lote no salió: no tiene sentido mandar los que
-                # siguen fuera de orden, y éste y los restantes quedan
-                # donde están para reintentarse enteros la próxima vez.
-                break
-            memoria.cambiar_lote(self.cx, [c["message_id"] for c in lote],
-                                 "en_resumen")
+        mios = [c for c in correos if c["categoria"] == "TUYO"]
+        derivar = [c for c in correos if c["categoria"] in ("ENZO", "NATALIA")]
+        equipo = [c for c in correos if c["categoria"] == "DELEGADO"]
+        ruido = [c for c in correos if c["categoria"] == "RUIDO"]
+        self._mandar_resumen_grande(momento, mios, derivar, equipo, ruido)
 
     def atender(self, update):
         raise NotImplementedError("tarea 11")
