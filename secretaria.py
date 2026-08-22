@@ -169,8 +169,21 @@ class Secretaria:
         # Qué message_id puede cerrar cada tanda de resumen con "Leí
         # todo": sin esto el botón no sabe cuáles marcar, y como los
         # botones de Telegram no vencen, dos resúmenes del mismo día no
-        # pueden compartir token (ver armar_resumen).
+        # pueden compartir token (ver armar_resumen). Tarea 11: cada vez
+        # que una tanda queda del todo resuelta -"Leí todo", "Confirmar",
+        # o el último ítem corregido con "Uno es mío"/Rever- se saca de
+        # acá (ver _sacar_de_abiertos). Sin esto crecía sin límite
+        # mientras viviera el proceso, quedó anotado desde la tarea 9.
         self.abiertos = {}
+        # Qué se le preguntó a JP y todavía espera contestación: un botón
+        # (Uno es mío, Rever) no puede quedarse bloqueado esperando la
+        # respuesta -el hilo que escucha se queda mudo para todo lo demás
+        # mientras tanto-, así que la pregunta pendiente vive acá, no en
+        # la pila de ninguna función, y se retoma en la próxima llamada a
+        # atender(), sea en un segundo o -tanda real medida- once horas
+        # después (ver responder_pendiente). Sólo una pregunta a la vez:
+        # JP es una sola persona contestando en orden, no hace falta cola.
+        self.pendiente = None
 
     def ciclo_de_correo(self):
         while not self.parada.is_set():
@@ -412,6 +425,18 @@ class Secretaria:
         no pudo decidir (DUDA), el correo se le muestra a JP con los
         botones de siempre. El silencio no es una categoría, así que nunca
         se archiva algo que no se pudo clasificar con confianza.
+
+        Con self.pausada en True esto NO corta de entrada -a propósito,
+        aunque /pausa's docstring en comando() diga "no toco la casilla":
+        esa frase es sobre ESCRIBIR (archivar, marcar leído), y acá abajo
+        eso ya lo garantiza puede_escribir() en cada punto que escribe
+        (_archivar, _terminar_de_archivar, _atender_pendientes). Cortar
+        acá arriba, antes de traer_nuevos, apagaría también la
+        clasificación y los avisos en el momento -haría falsa la otra
+        mitad de la misma frase, "te sigo avisando lo que entra" (diseño
+        §7.3/§8, y el propio texto de /pausa)-. Tocar la casilla y
+        seguir mirándola son cosas distintas; /pausa frena sólo la
+        primera.
         """
         from datetime import date, timedelta
         self._atender_pendientes()
@@ -1065,7 +1090,344 @@ class Secretaria:
         return nueva
 
     def atender(self, update):
-        raise NotImplementedError("tarea 11")
+        """Todo lo que llega de Telegram entra por acá: un botón, un audio
+        o texto.
+
+        Esto corre en ciclo_de_escucha, que no puede quedarse esperando
+        nada -mientras espera, Telegram queda mudo para todo lo demás,
+        que es justo por lo que clasificar (hasta tres minutos con
+        nvidia) vive en el otro hilo-. Por eso "esperar una respuesta" no
+        es un bucle acá adentro: es guardar QUÉ se preguntó en
+        self.pendiente -vive en el objeto, no en la pila de esta
+        función- y volver cuando llegue el próximo update, sea en el
+        segundo siguiente o -tanda real medida, ver bot.tg- once horas
+        después. Ver responder_pendiente().
+        """
+        cq = update.get("callback_query")
+        if cq:
+            return self.atender_boton(cq)
+        m = update.get("message") or {}
+        if m.get("voice"):
+            try:
+                texto = bot.transcribir(m["voice"]["file_id"])
+            except Exception as e:
+                self.enviar(f"No pude escuchar el audio ({type(e).__name__}). "
+                            f"¿Me lo escribís?")
+                return
+            texto = texto.strip()
+            if not texto:
+                # Transcribió pero no hay nada entendible -silencio, ruido
+                # de fondo-. Quedarse callado de acá en más sería la misma
+                # falla que este archivo entero existe para evitar: JP
+                # mandó un audio, cree que llegó, y no pasa nada.
+                self.enviar("No entendí nada en el audio. ¿Me lo escribís?")
+                return
+        elif "text" in m:
+            # Puede venir vacío o sólo espacios -no es lo normal desde la
+            # UI de Telegram, pero es justo la forma que toma un "motivo"
+            # en blanco si algún día se prueba a mano-: se deja pasar
+            # igual, para que responder_pendiente() decida qué hacer con
+            # eso en vez de que quede cortado acá sin que nadie se entere.
+            texto = m["text"].strip()
+        else:
+            return  # sticker, foto, etc.: ni texto ni audio, nada que atender
+        if texto.startswith("/"):
+            return self.comando(texto)
+        return self.responder_pendiente(texto)
+
+    def comando(self, texto):
+        from datetime import date
+        partes = texto.split()
+        cual = partes[0].lower()
+
+        if cual == "/pausa":
+            self.pausada = True
+            return self.enviar("⏸ Frenada. No toco más la casilla — no "
+                               "archivo ni marco leído. Te sigo avisando lo "
+                               "que entra. <code>/sigo</code> para soltarla.")
+        if cual == "/sigo":
+            self.pausada = False
+            return self.enviar("▶️ Listo, sigo trabajando.")
+        if cual == "/motor":
+            if len(partes) < 2:
+                return self.enviar("Decime cuál. Por ejemplo: "
+                                   "<code>/motor groq</code>")
+            try:
+                orden = clasificador.elegir_motor(partes[1])
+            except ValueError as e:
+                return self.enviar(f"⚠️ {html.escape(str(e))}")
+            return self.enviar(f"Listo, ahora uso <b>{orden[0]}</b>. "
+                               f"Si se queda sin cuota sigo con "
+                               f"{', '.join(orden[1:]) or '(nada)'}.")
+        if cual == "/estado":
+            hoy = date.today().isoformat()
+            n = memoria.contar_desde(self.cx, hoy)
+            latido = memoria.ultimo_latido(self.cx) or "nunca"
+            try:
+                motor = clasificador.motores()[0][0]
+            except (Exception, SystemExit):
+                # Sin ningún motor con credenciales en el .env,
+                # clasificador.motores() no tira ValueError: tira
+                # SystemExit, que NO hereda de Exception. Un "except
+                # Exception" a secas lo dejaba pasar de largo y tiraba
+                # abajo el hilo que escucha por algo tan poco excepcional
+                # como no tener un motor configurado todavía.
+                motor = "ninguno configurado"
+            return self.enviar(
+                f"<b>Estado</b>\n"
+                f"Correos de hoy: {n}\n"
+                f"Último latido: {latido}\n"
+                f"Motor: {motor}\n"
+                f"En seco: {'sí' if EN_SECO else 'no'}\n"
+                f"Pausada: {'sí' if self.pausada else 'no'}")
+        return self.enviar("No conozco ese comando. Tengo "
+                           "<code>/pausa</code>, <code>/sigo</code>, "
+                           "<code>/motor</code> y <code>/estado</code>.")
+
+    def atender_boton(self, cq):
+        """Todo lo que llega como botón entra por acá.
+
+        Los botones de Telegram no vencen nunca: un resumen de hace
+        semanas sigue teniendo botones vivos. Por eso la tanda no se saca
+        parseando el dato a mano -eso sólo confirma que TIENE forma de
+        tanda, no que sea una tanda que sigue abierta- sino recorriendo
+        self.abiertos y preguntándole a bot.es_de_esta_tanda() cuál, si
+        alguna, matchea de verdad: tanda Y idx (acá siempre 0, es el
+        único idx que usan los botones de tanda) Y forma del dato, los
+        tres a la vez. Si ninguna abierta matchea, es un botón viejo -de
+        una tanda ya cerrada, o de un resumen tan viejo que ya ni
+        arrancó el proceso actual- y se le dice que ya pasó, en vez de
+        aceptarlo como si fuera de hoy.
+        """
+        datos = cq.get("data") or ""
+        tanda = next((t for t in self.abiertos
+                     if bot.es_de_esta_tanda(datos, 0, t)), None)
+        if tanda is None:
+            bot.tg_suave("answerCallbackQuery", callback_query_id=cq["id"],
+                         text="Ese botón es de otro correo, ya pasó.")
+            return
+        bot.tg_suave("answerCallbackQuery", callback_query_id=cq["id"])
+        accion, _, valor = datos.split("|")
+
+        if accion == "t":                      # leí todo
+            return self._cerrar_equipo(tanda)
+        if accion == "m":                       # uno es mío
+            return self._abrir_uno_es_mio(tanda)
+        if accion == "c" and valor == "ruido":  # confirmar el resumen de ruido
+            return self._confirmar_ruido(tanda)
+        if accion == "r" and valor == "ruido":  # rever el resumen de ruido
+            return self._abrir_rever(tanda)
+        # Los demás botones -categorías, cliente importante- son de otro
+        # circuito (avisar_en_el_momento / avisar_para_que_decida) que
+        # todavía no registra su tanda en self.abiertos y por eso nunca
+        # llega hasta acá: se rechazan arriba, como cualquier tanda que
+        # no está abierta. Si algún día SÍ llegan acá con una tanda
+        # abierta y una acción que no reconocemos, mejor decirlo que
+        # quedarse mudo.
+        self.enviar("Todavía no sé qué hacer con ese botón.")
+
+    def _numerar(self, mids):
+        """La lista numerada de una tanda abierta, para mostrarla de
+        vuelta.
+
+        self.abiertos sólo guarda message_id -ver el comentario en
+        __init__-, así que de/asunto se reconstruyen desde la base. El
+        orden es el mismo con el que se numeró en armar_resumen /
+        armar_resumen_de_ruido (mids conserva el orden original incluso
+        si el mensaje se recortó por espacio), así que el número N
+        siempre selecciona el mismo correo que vio JP, esté o no
+        listado en el mensaje que se mandó.
+        """
+        lineas = []
+        for n, mid in enumerate(mids, 1):
+            fila = memoria.obtener(self.cx, mid)
+            if fila:
+                lineas.append(f"  {n}. {html.escape((fila['de'] or '')[:34])}"
+                              f" — {html.escape((fila['asunto'] or '')[:44])}")
+            else:
+                lineas.append(f"  {n}. (no lo encuentro en la base)")
+        return "\n".join(lineas)
+
+    def _sacar_de_abiertos(self, tanda, mid):
+        """Saca un solo correo de una tanda abierta, sin cerrarla entera.
+
+        El resto de la tanda puede seguir esperando -"Leí todo" para lo
+        que falta del equipo, u otro Rever para otro número de la misma
+        lista de ruido-. Si era el último, borra la tanda: es la
+        limpieza que quedó pendiente desde la tarea 9 (self.abiertos
+        creciendo sin límite mientras vive el proceso).
+        """
+        restantes = [m for m in self.abiertos.get(tanda, []) if m != mid]
+        if restantes:
+            self.abiertos[tanda] = restantes
+        else:
+            self.abiertos.pop(tanda, None)
+
+    def _cerrar_equipo(self, tanda):
+        """"Leí todo": marca leídos y cierra los correos del equipo que
+        siguen en esta tanda.
+
+        Toda escritura pasa por puede_escribir() -en seco o pausada, no
+        se toca la casilla-, y la situación pasa a "cerrado" igual: JP ya
+        dijo que los vio, que es lo que este estado registra, no si el
+        \\Seen efectivamente se pudo escribir en el servidor. Un fallo de
+        marcar_leido no puede tirar abajo el resto del lote -a
+        diferencia de archivar, léído no tiene reintento propio, así que
+        no hay nada que perder reintentando desde cero la próxima vez- y
+        tampoco puede quedar en silencio: si algo falló, se avisa cuántos.
+        """
+        mids = self.abiertos.pop(tanda, [])
+        fallaron = 0
+        for mid in mids:
+            if self.puede_escribir():
+                fila = memoria.obtener(self.cx, mid)
+                try:
+                    if fila:
+                        correo.marcar_leido(fila)
+                except Exception as e:
+                    fallaron += 1
+                    _registrar("leido", e)
+            memoria.cambiar(self.cx, mid, "cerrado")
+        if fallaron:
+            self.enviar(f"Listo. Ojo: {fallaron} no se pudieron marcar "
+                       f"como leídos en la casilla -van a seguir "
+                       f"apareciendo sin leer ahí, aunque ya no te los "
+                       f"muestre más.")
+
+    def _abrir_uno_es_mio(self, tanda):
+        """"Uno es mío": muestra de vuelta la lista numerada del equipo y
+        se queda esperando qué número señala JP."""
+        mids = self.abiertos.get(tanda) or []
+        if not mids:
+            return
+        self.pendiente = {"tipo": "uno_es_mio", "tanda": tanda}
+        self.enviar(f"{self._numerar(mids)}\n\n¿Cuál es tuyo? Decime el "
+                   f"número.")
+
+    def _confirmar_ruido(self, tanda):
+        """"Confirmar" del resumen de ruido: nada que corregir, se cierra
+        la tanda entera."""
+        mids = self.abiertos.pop(tanda, [])
+        memoria.cambiar_lote(self.cx, mids, "cerrado")
+
+    def _abrir_rever(self, tanda):
+        """"Rever": muestra de vuelta la lista numerada de lo archivado
+        hoy y se queda esperando qué número no era ruido -el motivo se
+        pide después, una vez que JP elige (ver _responder_numero)."""
+        mids = self.abiertos.get(tanda) or []
+        if not mids:
+            return
+        self.pendiente = {"tipo": "rever_elegir", "tanda": tanda}
+        self.enviar(f"{self._numerar(mids)}\n\n¿Cuál no era ruido? Decime "
+                   f"el número.")
+
+    def responder_pendiente(self, texto):
+        """Interpreta lo que JP acaba de escribir (o decir, ya
+        transcripto) contra self.pendiente: la pregunta abierta más
+        reciente, si hay una.
+
+        Sin nada pendiente, un texto suelto no es un comando ni la
+        respuesta a nada -entender preguntas libres es la Etapa 4, que
+        todavía no existe-. Contestar "no entiendo" acá sería pobre;
+        mentir sobre lo que el sistema sabe hacer hoy sería peor. Se le
+        dice la verdad: todavía sólo entiende comandos y botones.
+        """
+        p = self.pendiente
+        if not p:
+            return self.enviar(
+                "Todavía no sé responder preguntas sueltas -eso es la "
+                "Etapa 4, no existe todavía-. Hoy entiendo comandos "
+                "(<code>/pausa</code>, <code>/sigo</code>, "
+                "<code>/motor</code>, <code>/estado</code>) y los botones "
+                "de los resúmenes.")
+        if p["tipo"] in ("uno_es_mio", "rever_elegir"):
+            return self._responder_numero(texto, p)
+        if p["tipo"] == "rever_motivo":
+            return self._responder_motivo_rever(texto, p)
+
+    def _responder_numero(self, texto, p):
+        """El paso común de "Uno es mío" y "Rever": JP eligió un número de
+        la lista que se le mostró.
+
+        Si la tanda se cerró mientras tanto -alguien tocó "Leí todo" u
+        otro Rever/Uno es mío ya se comió el último ítem-, no hay nada
+        contra qué validar el número: se le avisa en vez de fallar en
+        silencio o, peor, aceptar cualquier cosa. Un número fuera de
+        rango no borra la pregunta pendiente -JP puede reintentar sin
+        tener que tocar el botón de nuevo-.
+        """
+        tanda = p["tanda"]
+        mids = self.abiertos.get(tanda)
+        if not mids:
+            self.pendiente = None
+            return self.enviar("Esa tanda ya se cerró, no puedo tomar esa "
+                               "respuesta.")
+        crudo = texto.strip()
+        if not crudo.isdigit() or not (1 <= int(crudo) <= len(mids)):
+            return self.enviar(f"Decime un número del 1 al {len(mids)}.")
+        mid = mids[int(crudo) - 1]
+        if p["tipo"] == "uno_es_mio":
+            self.pendiente = None
+            return self._marcar_como_mio(tanda, mid)
+        # rever_elegir: falta el motivo, que puede llegar por texto o por
+        # audio -bot.transcribir() ya lo convirtió a texto antes de
+        # llegar hasta acá, ver atender()-.
+        self.pendiente = {"tipo": "rever_motivo", "tanda": tanda,
+                          "message_id": mid}
+        return self.enviar("¿Por qué no era ruido? Contame con tus "
+                           "palabras -texto o audio-.")
+
+    def _marcar_como_mio(self, tanda, mid):
+        """JP corrigió: uno del bloque del equipo es en realidad suyo.
+
+        A diferencia de rever_ruido(), acá no hace falta tocar la
+        casilla -DELEGADO nunca se archiva, el correo sigue en INBOX
+        donde siempre estuvo- ni volver a preguntarle al modelo: JP ya
+        dio la categoría, TUYO, con el propio botón. Se guarda igual
+        como corrección (memoria.corregir conserva `categoria`, lo que
+        dijo el sistema, para poder medir si aprende) y vuelve a
+        "clasificado" para que el PRÓXIMO resumen lo muestre donde
+        corresponde -mismo criterio que rever_ruido con las categorías
+        accionables, ver _categoria_de_resumen.
+        """
+        memoria.corregir(self.cx, mid, "TUYO",
+                         "(marcado con el botón 'Uno es mío', sin motivo"
+                         " adicional)")
+        memoria.cambiar(self.cx, mid, "clasificado")
+        self._sacar_de_abiertos(tanda, mid)
+        self.enviar("Anotado: lo saco del equipo, va a aparecer como tuyo "
+                   "en el próximo resumen.")
+
+    def _responder_motivo_rever(self, texto, p):
+        """El último paso de Rever: JP ya dijo por qué, ahora se ejecuta
+        rever_ruido().
+
+        Un motivo vacío -audio que transcribió a nada, mensaje en
+        blanco- no alcanza para nada: no hay qué guardar como
+        explicación y clasificador.clasificar() lo necesita como
+        contexto. rever_ruido() puede fallar de dos formas conocidas -el
+        freno puesto (SecretariaFrenada) o cualquier otra cosa real- y
+        ninguna de las dos puede quedar en silencio: JP tocó Rever,
+        contestó el motivo, y si no pasa nada de acá en más es la misma
+        falla silenciosa de siempre, sólo que un paso más adentro.
+        """
+        self.pendiente = None
+        mid, tanda = p["message_id"], p["tanda"]
+        explicacion = texto.strip()
+        if not explicacion:
+            return self.enviar("No entendí el motivo. Tocá Rever de "
+                               "nuevo si querés reintentar.")
+        try:
+            nueva = self.rever_ruido(mid, explicacion)
+        except SecretariaFrenada as e:
+            return self.enviar(f"⏸ No puedo hacerlo ahora: "
+                               f"{html.escape(str(e))}")
+        except Exception as e:
+            return self.enviar(f"No pude corregirlo "
+                               f"({type(e).__name__}: {e}). Probá de "
+                               f"nuevo con Rever.")
+        self._sacar_de_abiertos(tanda, mid)
+        self.enviar(f"Listo, corregido a <b>{html.escape(nueva)}</b>.")
 
     def arrancar(self):
         hilos = [threading.Thread(target=self.ciclo_de_correo, daemon=True,

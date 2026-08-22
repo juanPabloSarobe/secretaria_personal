@@ -283,6 +283,21 @@ def latido(cx, momento):
         cx.commit()
 
 
+def contar_desde(cx, desde):
+    """Cuántos correos se vieron desde `desde` (fecha ISO), para /estado.
+
+    Con el candado, como cualquier otra lectura de acá: es la misma
+    conexión que toca el otro hilo (ver el docstring del módulo), y un
+    execute() suelto sin el candado reintroduce justo lo que a la tarea 6
+    le costó dos rondas arreglar -filas perdidas e InterfaceError bajo
+    carga con dos hilos escribiendo a la vez.
+    """
+    with _CANDADO:
+        f = cx.execute("SELECT COUNT(*) c FROM correos WHERE visto >= ?",
+                       (desde,)).fetchone()
+    return f["c"]
+
+
 def ultimo_latido(cx):
     with _CANDADO:
         f = cx.execute("SELECT MAX(momento) AS m FROM latidos").fetchone()
