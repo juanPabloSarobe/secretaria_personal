@@ -263,6 +263,33 @@ class NoMandaUnaAndanadaSiSePerdieronVarios(unittest.TestCase):
 
         s._disparar_resumenes(datetime(2026, 8, 24, 9, 0))
 
+        self.assertEqual(len(disparados), 1)
+
+    def test_el_saludo_evita_ruido_si_hay_otro_pendiente(self):
+        """Hallazgo de la ronda 1: el saludo se elegía con
+        pendientes[-1] sin más, así que si el último corte perdido era
+        el de las 18 -"ruido"-, JP recibía "Lo que archivé hoy" sobre un
+        resumen que en realidad traía de vuelta correos suyos
+        acumulados de varios días. Se prefiere el último pendiente que
+        no sea "ruido"."""
+        s = secretaria.Secretaria(cx=_CxMuda())
+        disparados = []
+        s.mandar_resumen = disparados.append
+        s.reloj.momentos_pendientes = lambda ahora, ultimo: [
+            "manana", "tarde", "ruido"]
+
+        s._disparar_resumenes(datetime(2026, 8, 24, 9, 0))
+
+        self.assertEqual(disparados, ["tarde"])
+
+    def test_el_saludo_de_ruido_se_usa_si_es_lo_unico_pendiente(self):
+        s = secretaria.Secretaria(cx=_CxMuda())
+        disparados = []
+        s.mandar_resumen = disparados.append
+        s.reloj.momentos_pendientes = lambda ahora, ultimo: ["ruido"]
+
+        s._disparar_resumenes(datetime(2026, 8, 24, 18, 0))
+
         self.assertEqual(disparados, ["ruido"])
 
     def test_un_solo_momento_pendiente_se_manda_igual(self):

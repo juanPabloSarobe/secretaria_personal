@@ -45,6 +45,37 @@ class Anotar(unittest.TestCase):
         self.assertEqual([c["asunto"] for c in p], ["uno"])
 
 
+class CambiarLote(unittest.TestCase):
+    """cambiar_lote() existe para que marcar un resumen entero sea una
+    sola transacción -ver el comentario en memoria.py sobre por qué un
+    commit por fila deja una ventana donde JP ya vio el mensaje pero la
+    base todavía no lo sabe."""
+
+    def setUp(self):
+        self.f = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.cx = memoria.abrir(self.f.name)
+
+    def tearDown(self):
+        self.cx.close()
+        os.unlink(self.f.name)
+
+    def test_marca_todos_los_del_lote(self):
+        for mid in ("<1@x>", "<2@x>", "<3@x>"):
+            memoria.anotar(self.cx, un_correo(mid, mid), "TUYO", "m")
+        memoria.cambiar_lote(self.cx, ["<1@x>", "<2@x>", "<3@x>"], "en_resumen")
+        for mid in ("<1@x>", "<2@x>", "<3@x>"):
+            self.assertEqual(memoria.situacion(self.cx, mid), "en_resumen")
+
+    def test_una_lista_vacia_no_hace_nada(self):
+        memoria.cambiar_lote(self.cx, [], "en_resumen")  # no debe romper
+
+    def test_una_situacion_inventada_se_rechaza_sin_tocar_nada(self):
+        memoria.anotar(self.cx, un_correo("<1@x>", "uno"), "TUYO", "m")
+        with self.assertRaises(ValueError):
+            memoria.cambiar_lote(self.cx, ["<1@x>"], "inventada")
+        self.assertEqual(memoria.situacion(self.cx, "<1@x>"), "clasificado")
+
+
 class Concurrencia(unittest.TestCase):
     """El hilo que escucha a JP por Telegram y el que procesa correo tocan
     la misma conexión a la vez. Sin coordinación esto disparaba

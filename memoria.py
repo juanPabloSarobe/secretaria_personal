@@ -159,6 +159,34 @@ def cambiar(cx, message_id, nueva):
         cx.commit()
 
 
+def cambiar_lote(cx, message_ids, nueva):
+    """Como cambiar(), pero para varios mensajes en una sola transacción.
+
+    Marcar un resumen entero llamando a cambiar() uno por uno hace un
+    commit por fila: si el proceso muere a mitad de camino, los que ya
+    se marcaron no se repiten pero los que no llegaron a marcarse sí,
+    aunque Telegram ya confirmó que el mensaje entero salió y JP ya los
+    vio. Acá el UPDATE de todo el lote va en una sola transacción, con
+    un solo commit al final: o quedan todos marcados, o -si el proceso
+    muere antes del commit- no queda marcado ninguno y el próximo
+    resumen los vuelve a incluir. Repetir algo que JP ya vio es
+    molesto; darlo por visto sin que lo esté es la falla silenciosa que
+    este archivo existe para evitar.
+    """
+    if not message_ids:
+        return
+    if nueva not in SITUACIONES:
+        raise ValueError(f"situación desconocida: {nueva}. "
+                         f"Hay: {', '.join(sorted(SITUACIONES))}")
+    with _CANDADO:
+        momento = _ahora()
+        cx.executemany(
+            "UPDATE correos SET situacion = ?, actualizado = ?"
+            " WHERE message_id = ?",
+            [(nueva, momento, mid) for mid in message_ids])
+        cx.commit()
+
+
 def sumar_intento(cx, message_id):
     """Cuenta un intento fallido de archivado y devuelve cuántos van.
 

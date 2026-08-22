@@ -38,6 +38,18 @@ HORA_INICIO, HORA_FIN = 8, 19
 
 MOMENTOS = [("manana", 8, 30), ("tarde", 17, 0), ("ruido", 18, 0)]
 
+# Medido: 80 correos en un resumen dan 4.573 caracteres, 100 dan 5.684.
+# Telegram corta el texto de un mensaje en 4.096 -Bot API, no negociable-
+# y lo rechaza entero: no es un mensaje recortado, es CERO mensaje.
+LIMITE_TELEGRAM = 4096
+
+# Cuántos correos entran, sobrando margen de sobra, en un solo mensaje de
+# resumen. Sólo se usa si ni colapsando el bloque del equipo (ver
+# armar_resumen) el resumen entra en un mensaje -lo de JP y lo para
+# derivar nunca se recortan, así que ese es el único caso en que hace
+# falta partir en varios.
+TAMANO_LOTE_RESUMEN = 15
+
 
 def en_horario(momento):
     """De 8 a 19, días hábiles (lunes a viernes). Fuera de eso, lo que
@@ -147,7 +159,7 @@ class Secretaria:
         pendientes = self.reloj.momentos_pendientes(ahora, self.ultimo_reloj)
         if pendientes:
             # Si se perdieron varios -una caída de días, o un fin de
-            # semana largo que el filtro de arriba no alcanzó a
+            # semana largo que el filtro del reloj no alcanzó a
             # absorber del todo- mandarlos todos de a uno sería una
             # andanada apenas se reconecta. JP quiere saber qué pasó,
             # no reconstruir una cronología resumen por resumen: uno
@@ -155,7 +167,15 @@ class Secretaria:
             # partir de lo que sigue sin resumir en la base (no de qué
             # momento se lo llamó), ese único envío ya junta todo lo
             # pendiente, no sólo lo del último corte.
-            self.mandar_resumen(pendientes[-1])
+            #
+            # El saludo evita "ruido" si hay otro pendiente: ese saludo
+            # es "Lo que archivé hoy", y si el contenido trae de vuelta
+            # correos de JP acumulados de varios días -típico después de
+            # una caída larga- ese texto no describe lo que hay adentro.
+            # Sólo se usa "ruido" cuando es el único momento pendiente.
+            momento = next((m for m in reversed(pendientes) if m != "ruido"),
+                           pendientes[-1])
+            self.mandar_resumen(momento)
         if ahora > self.ultimo_reloj:
             self.ultimo_reloj = ahora
 
@@ -539,6 +559,20 @@ class Secretaria:
         abiertos hasta que JP haga algo con ellos -eso lo maneja el
         manejo de botones de la tarea 11, no esta función-. Lo del
         equipo se cierra de un toque, con "Leí todo".
+
+        Medido: 80 correos ya dan 4.573 caracteres, contra el límite de
+        Telegram de 4.096 -y Telegram no recorta, rechaza el mensaje
+        entero-. Lo de JP y lo para derivar nunca se recortan -es poco y
+        es lo que importa-, pero el bloque del equipo es el grueso y
+        crece con el volumen sin que a JP le haga falta ver cada línea
+        -son correos que nadie tiene que revisar uno por uno-. Por eso,
+        si el texto completo no entra, el equipo se colapsa a las
+        primeras líneas que entren más un conteo explícito de cuántas se
+        omitieron: nunca un recorte callado, que es la falla silenciosa
+        que este archivo ya aprendió a temer. El conteo del encabezado
+        ("El equipo lo maneja (N)") sigue siendo el total real aunque no
+        se listen todas, así que nada quedó afuera del resumen en sí:
+        sólo de la lista de nombres.
         """
         import secrets
         tanda = secrets.token_hex(2)
@@ -555,22 +589,43 @@ class Secretaria:
             return (f"{self.SALUDO[momento]} No entró nada nuevo.",
                     {"inline_keyboard": []})
 
-        lineas = [f"{self.SALUDO[momento]} Entraron {len(correos)} correos."]
+        cabecera = [f"{self.SALUDO[momento]} Entraron {len(correos)} correos."]
         if mios:
-            lineas.append(f"\n📌 <b>Tuyo ({len(mios)})</b>")
-            lineas += [f"  · {html.escape(c['de'][:34])} — "
-                       f"{html.escape(c['asunto'][:48])}" for c in mios]
+            cabecera.append(f"\n📌 <b>Tuyo ({len(mios)})</b>")
+            cabecera += [f"  · {html.escape(c['de'][:34])} — "
+                        f"{html.escape(c['asunto'][:48])}" for c in mios]
         if derivar:
-            lineas.append(f"\n➡️ <b>Para derivar ({len(derivar)})</b>")
-            lineas += [f"  · {html.escape(c['asunto'][:44])} → "
-                       f"{c['categoria'].title()}" for c in derivar]
-        if equipo:
-            lineas.append(f"\n✅ <b>El equipo lo maneja ({len(equipo)})</b>")
-            lineas += [f"  {n}. {html.escape(c['de'][:26])} — "
-                       f"{html.escape(c['asunto'][:40])}"
-                       for n, c in enumerate(equipo, 1)]
-        if ruido:
-            lineas.append(f"\n🗑 Archivado como ruido: {len(ruido)}")
+            cabecera.append(f"\n➡️ <b>Para derivar ({len(derivar)})</b>")
+            cabecera += [f"  · {html.escape(c['asunto'][:44])} → "
+                        f"{c['categoria'].title()}" for c in derivar]
+        pie = [f"\n🗑 Archivado como ruido: {len(ruido)}"] if ruido else []
+
+        titulo_equipo = (f"\n✅ <b>El equipo lo maneja ({len(equipo)})</b>"
+                         if equipo else None)
+        lineas_equipo = [f"  {n}. {html.escape(c['de'][:26])} — "
+                         f"{html.escape(c['asunto'][:40])}"
+                         for n, c in enumerate(equipo, 1)]
+
+        bloque_equipo = ([titulo_equipo] + lineas_equipo) if equipo else []
+        texto = "\n".join(cabecera + bloque_equipo + pie)
+
+        if equipo and len(texto) > LIMITE_TELEGRAM:
+            # No entra completo: se colapsa el equipo, no lo accionable.
+            # Presupuesto = lo que sobra después de lo que nunca se
+            # recorta, con margen para el título y el aviso de corte.
+            base = "\n".join(cabecera + pie)
+            presupuesto = LIMITE_TELEGRAM - len(base) - len(titulo_equipo) - 80
+            incluidas, largo = [], 0
+            for linea in lineas_equipo:
+                if largo + len(linea) + 1 > presupuesto:
+                    break
+                incluidas.append(linea)
+                largo += len(linea) + 1
+            faltan = len(equipo) - len(incluidas)
+            aviso = ([f"  … y {faltan} más, sin listar por espacio "
+                      f"(ya están en el conteo de arriba)"] if faltan else [])
+            texto = "\n".join(cabecera + [titulo_equipo] + incluidas
+                              + aviso + pie)
 
         filas = []
         if equipo:
@@ -578,12 +633,13 @@ class Secretaria:
                            "callback_data": f"t|{tanda}-0|equipo"},
                           {"text": "⚠ Uno es mío",
                            "callback_data": f"m|{tanda}-0|equipo"}])
-        # Asocia esta tanda con los correos que "Leí todo" puede cerrar.
-        # Sin esto, el botón no sabría a cuáles marcar como leídos -y
-        # como cada tanda tiene su propio token, un resumen viejo nunca
-        # puede cerrar los correos de uno nuevo.
+        # Asocia esta tanda con TODOS los correos del equipo -aunque
+        # algunos no se hayan listado por espacio-. Sin esto, "Leí todo"
+        # no sabría a cuáles marcar como leídos, y como cada tanda tiene
+        # su propio token, un resumen viejo nunca puede cerrar los
+        # correos de uno nuevo.
         self.abiertos[tanda] = [c["message_id"] for c in equipo]
-        return "\n".join(lineas), {"inline_keyboard": filas}
+        return texto, {"inline_keyboard": filas}
 
     def mandar_resumen(self, momento):
         """Junta lo pendiente de resumir y lo manda por Telegram.
@@ -599,19 +655,45 @@ class Secretaria:
         resumir por algún borde no previsto, tiene que aparecer en el
         próximo resumen que salga, no perderse en silencio hasta que
         alguien lo note a mano.
+
+        Normalmente un solo mensaje alcanza -armar_resumen ya colapsa el
+        bloque del equipo así que no crece sin límite con el volumen-.
+        Sólo si ni así entra -lo de JP y lo para derivar, que nunca se
+        recortan, son tantos que igual desbordan- se parte en varios
+        mensajes. Cada lote se marca "en_resumen" recién cuando SU envío
+        confirma, y si uno falla no se manda el siguiente: mejor que el
+        próximo resumen repita un lote entero a que dé por visto algo
+        que Telegram nunca entregó.
         """
         correos = (memoria.del_dia(self.cx, "clasificado", "") +
                    memoria.del_dia(self.cx, "archivado", ""))
         texto, teclado = self.armar_resumen(correos, momento)
-        resultado = self.enviar(texto, teclado)
-        if resultado:
-            # Recién si el envío salió de verdad se consumen: si
-            # Telegram está caído, tienen que quedar donde están para
-            # que el próximo resumen los vuelva a incluir -mismo criterio
-            # que _avisar_la_falla con el archivado que no se pudo
-            # confirmar.
-            for c in correos:
-                memoria.cambiar(self.cx, c["message_id"], "en_resumen")
+        if len(texto) <= LIMITE_TELEGRAM:
+            resultado = self.enviar(texto, teclado)
+            if resultado:
+                # Una sola transacción para todo el lote: con un commit
+                # por correo, morir a mitad de camino deja marcados sólo
+                # algunos aunque el mensaje entero ya salió y JP ya lo
+                # vio entero -la próxima vuelta repetiría el resto como
+                # si fuera nuevo. Atómico, se marcan todos o ninguno.
+                memoria.cambiar_lote(self.cx, [c["message_id"] for c in correos],
+                                     "en_resumen")
+            return
+
+        lotes = [correos[i:i + TAMANO_LOTE_RESUMEN]
+                for i in range(0, len(correos), TAMANO_LOTE_RESUMEN)]
+        for n, lote in enumerate(lotes, 1):
+            texto, teclado = self.armar_resumen(lote, momento)
+            if len(lotes) > 1:
+                texto = f"{texto}\n\n(parte {n}/{len(lotes)})"
+            resultado = self.enviar(texto, teclado)
+            if not resultado:
+                # Este lote no salió: no tiene sentido mandar los que
+                # siguen fuera de orden, y éste y los restantes quedan
+                # donde están para reintentarse enteros la próxima vez.
+                break
+            memoria.cambiar_lote(self.cx, [c["message_id"] for c in lote],
+                                 "en_resumen")
 
     def atender(self, update):
         raise NotImplementedError("tarea 11")

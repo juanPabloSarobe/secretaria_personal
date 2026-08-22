@@ -105,5 +105,106 @@ class MandarResumen(unittest.TestCase):
         self.assertIn("no entró nada", enviar.call_args[0][0].lower())
 
 
+class Volumen(unittest.TestCase):
+    """Ronda de arreglo 1: medido, 80 correos dan 4.573 caracteres y 100
+    dan 5.684, contra el límite de Telegram de 4.096. Sin colapsar el
+    bloque del equipo, el mensaje no entra y Telegram lo rechaza entero
+    -ni resumen recortado, CERO resumen-, así que el atraso se vuelve a
+    juntar la próxima vez y falla exactamente igual: determinista, no se
+    autocorrige nunca."""
+
+    def setUp(self):
+        f = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.s = secretaria.Secretaria(cx=memoria.abrir(f.name))
+
+    def _equipo(self, n):
+        # El asunto tiene que entrar entero en los 40 caracteres que
+        # armar_resumen no recorta por línea, si no el número que lo
+        # distingue queda afuera del texto y el test no puede contarlo.
+        return [fila(f"<e{i}@x>", f"Asunto correo {i}", "DELEGADO")
+                for i in range(n)]
+
+    def test_con_100_correos_el_texto_entra_en_el_limite(self):
+        texto, _ = self.s.armar_resumen(self._equipo(100), "manana")
+        self.assertLessEqual(len(texto), secretaria.LIMITE_TELEGRAM)
+
+    def test_el_recorte_se_anuncia_con_la_cuenta_exacta_de_lo_omitido(self):
+        correos = self._equipo(100)
+        texto, _ = self.s.armar_resumen(correos, "manana")
+        # El encabezado sigue diciendo el total real, no el listado.
+        self.assertIn("El equipo lo maneja (100)", texto)
+        listadas = sum(1 for c in correos if c["asunto"] in texto)
+        self.assertLess(listadas, 100, "con 100 no debería entrar la lista completa")
+        omitidas = 100 - listadas
+        self.assertIn(f"{omitidas} más", texto)
+
+    def test_lo_accionable_nunca_se_recorta_aunque_el_equipo_sea_enorme(self):
+        """Lo de JP y lo para derivar son "poco" -es la premisa del
+        diseño-, así que tienen que aparecer siempre, entero, sin
+        importar cuánto equipo haya alrededor."""
+        mios = [fila(f"<m{i}@x>", f"Mío número {i} bien distintivo", "TUYO")
+                for i in range(5)]
+        derivar = [fila(f"<d{i}@x>", f"Derivar número {i} bien distintivo",
+                        "ENZO") for i in range(5)]
+        correos = mios + derivar + self._equipo(150)
+
+        texto, _ = self.s.armar_resumen(correos, "manana")
+
+        self.assertLessEqual(len(texto), secretaria.LIMITE_TELEGRAM)
+        for c in mios + derivar:
+            self.assertIn(c["asunto"], texto,
+                          f"se recortó algo accionable: {c['asunto']!r}")
+
+
+class MandarResumenPorLotes(unittest.TestCase):
+    """El caso extremo: ni colapsando el equipo entra en un solo mensaje
+    -en la práctica hace falta un LIMITE_TELEGRAM chico a propósito para
+    provocarlo en un test, porque el colapso normal ya absorbe cualquier
+    volumen de equipo-. Ahí mandar_resumen tiene que partir en varios
+    mensajes y marcar cada lote como hecho recién cuando ESE lote salió
+    de verdad."""
+
+    def setUp(self):
+        f = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.s = secretaria.Secretaria(cx=memoria.abrir(f.name))
+        for i in range(40):
+            memoria.anotar(self.s.cx, correo_falso(f"<m{i}@x>", f"Mío {i}"),
+                           "TUYO", "m")
+
+    def test_manda_varios_mensajes_y_marca_todo_si_todos_salen(self):
+        with mock.patch.object(secretaria, "LIMITE_TELEGRAM", 400), \
+             mock.patch.object(secretaria, "TAMANO_LOTE_RESUMEN", 5), \
+             mock.patch.object(self.s, "enviar",
+                               return_value={"ok": True}) as enviar:
+            self.s.mandar_resumen("manana")
+
+        self.assertGreater(enviar.call_count, 1)
+        for i in range(40):
+            self.assertEqual(memoria.situacion(self.s.cx, f"<m{i}@x>"),
+                             "en_resumen")
+
+    def test_si_un_lote_falla_ni_ese_ni_los_siguientes_quedan_marcados(self):
+        """Nunca se marca como enviado algo que no salió: si Telegram se
+        cae a mitad de la tanda, ni el lote que falló ni los que
+        vendrían después se dan por vistos -se reintentan enteros la
+        próxima vez-, pero los que ya habían salido antes de la falla
+        quedan marcados, porque esos JP los vio de verdad."""
+        salidas = [{"ok": True}, {"ok": True}, None, {"ok": True}]
+        with mock.patch.object(secretaria, "LIMITE_TELEGRAM", 400), \
+             mock.patch.object(secretaria, "TAMANO_LOTE_RESUMEN", 5), \
+             mock.patch.object(self.s, "enviar", side_effect=salidas):
+            self.s.mandar_resumen("manana")
+
+        # Los primeros dos lotes (10 correos) salieron: marcados.
+        for i in range(10):
+            self.assertEqual(memoria.situacion(self.s.cx, f"<m{i}@x>"),
+                             "en_resumen")
+        # El tercer lote falló, y nada después de él se intentó ni se
+        # marcó: sigue "clasificado", listo para el próximo resumen.
+        for i in range(10, 40):
+            self.assertEqual(memoria.situacion(self.s.cx, f"<m{i}@x>"),
+                             "clasificado")
+
+
 if __name__ == "__main__":
     unittest.main()
