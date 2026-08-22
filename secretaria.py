@@ -110,6 +110,38 @@ class Reloj:
         return salida
 
 
+class SecretariaFrenada(Exception):
+    """Rever no puede escribir en la casilla ahora mismo: el freno en
+    seco está puesto, o JP pausó la secretaria.
+
+    A diferencia de _archivar() -parte del ciclo automático, que
+    simplemente no hace nada este ciclo porque el próximo reintenta-,
+    rever_ruido() es una acción puntual que JP disparó a mano, ahora: no
+    hacer nada y quedarse callado sería la misma falla silenciosa de
+    siempre, sólo que esta vez JP cree que tocó Rever y no pasó nada. Por
+    eso esto se levanta en vez de devolver algo o no hacer nada: quien
+    maneja el botón (tarea 11) puede así decirle a JP "no puedo, está
+    frenado" en vez de contestar como si hubiera funcionado.
+    """
+
+
+def _categoria_de_resumen(c):
+    """Con qué categoría entra un correo al resumen: la que dijo JP si
+    corrigió (categoria_jp), la que dijo el sistema si no.
+
+    memoria.corregir() preserva `categoria` a propósito -es la que
+    compara revisar_reglas.py para medir si el sistema aprende, y
+    pisarla le arruinaría esa comparación- así que ese campo no sirve
+    para decidir cómo mostrar el correo HOY. Sin esto, un correo que
+    Rever reclasificó como NATALIA seguía contando como ruido en el
+    próximo resumen: armar_resumen miraba `categoria` (RUIDO, lo que
+    dijo el sistema la primera vez) donde hacía falta mirar
+    `categoria_jp` (NATALIA, lo que corrigió JP). Ese conteo mal hecho es
+    exactamente el trabajo que Rever existe para evitarle a JP.
+    """
+    return c.get("categoria_jp") or c["categoria"]
+
+
 def _registrar(prefijo, e):
     """Loguea una excepción de los ciclos sin poder tirar nada hacia
     afuera.
@@ -206,10 +238,11 @@ class Secretaria:
 
         Junta los dos frenos en un solo lugar: EN_SECO (variable de
         entorno, fija para todo el proceso) y self.pausada (que JP puede
-        prender desde Telegram). Hoy sólo lo usa mover_a, pero cuando las
-        tareas 9 a 11 conecten marcar_leido y devolver_a_bandeja, cada
-        punto nuevo tiene que pasar por acá en vez de repetir el chequeo
-        de EN_SECO suelto en cada lugar —que es justo como estaba antes.
+        prender desde Telegram). Lo usan mover_a (_archivar) y
+        devolver_a_bandeja (rever_ruido, tarea 10); falta conectar
+        marcar_leido, que en algún momento de la tarea 11 va a necesitar
+        el mismo chequeo en vez de repetir EN_SECO suelto en cada lugar
+        —que es justo como estaba antes.
         """
         return not EN_SECO and not self.pausada
 
@@ -570,11 +603,12 @@ class Secretaria:
         mucho volumen (_empacar_accionable) sin duplicar el formato: que
         las dos rutas dibujen el mismo correo distinto sería un bug
         esperando pasar."""
-        if c["categoria"] == "TUYO":
+        categoria = _categoria_de_resumen(c)
+        if categoria == "TUYO":
             return (f"  · {html.escape(c['de'][:34])} — "
                    f"{html.escape(c['asunto'][:48])}")
         return (f"  · {html.escape(c['asunto'][:44])} → "
-               f"{c['categoria'].title()}")
+               f"{categoria.title()}")
 
     def _lineas_mios_derivar(self, mios, derivar):
         """El bloque de lo accionable -título con conteo más una línea
@@ -619,10 +653,11 @@ class Secretaria:
         """
         import secrets
         tanda = secrets.token_hex(2)
-        mios = [c for c in correos if c["categoria"] == "TUYO"]
-        derivar = [c for c in correos if c["categoria"] in ("ENZO", "NATALIA")]
-        equipo = [c for c in correos if c["categoria"] == "DELEGADO"]
-        ruido = [c for c in correos if c["categoria"] == "RUIDO"]
+        mios = [c for c in correos if _categoria_de_resumen(c) == "TUYO"]
+        derivar = [c for c in correos
+                  if _categoria_de_resumen(c) in ("ENZO", "NATALIA")]
+        equipo = [c for c in correos if _categoria_de_resumen(c) == "DELEGADO"]
+        ruido = [c for c in correos if _categoria_de_resumen(c) == "RUIDO"]
 
         if not correos:
             # "No entró nada nuevo" es información, no la ausencia de
@@ -693,8 +728,9 @@ class Secretaria:
         el peor caso es un mensaje que Telegram rechaza y que se
         reintenta entero la próxima vuelta -no una pérdida.
         """
-        mios = [c for c in correos if c["categoria"] == "TUYO"]
-        derivar = [c for c in correos if c["categoria"] in ("ENZO", "NATALIA")]
+        mios = [c for c in correos if _categoria_de_resumen(c) == "TUYO"]
+        derivar = [c for c in correos
+                  if _categoria_de_resumen(c) in ("ENZO", "NATALIA")]
         saludo = f"{self.SALUDO[momento]} Entraron {len(correos)} correos."
         largo = len(saludo) + sum(
             len(l) + 1 for l in self._lineas_mios_derivar(mios, derivar))
@@ -786,6 +822,85 @@ class Secretaria:
             memoria.cambiar_lote(self.cx, [c["message_id"] for c in equipo + ruido],
                                  "en_resumen")
 
+    def armar_resumen_de_ruido(self, correos):
+        """El texto y los botones del resumen de ruido de las 18:00.
+
+        Es la red que atrapa el error más caro del sistema: algo de JP
+        que se fue al tacho. Por eso es una lista NUMERADA -a diferencia
+        del pie de armar_resumen(), que sólo cuenta cuántos se
+        archivaron- y por eso lleva sólo dos botones: "Confirmar" cierra
+        la tanda de un toque si a JP no le llama la atención nada;
+        "Rever" es el arranque de la conversación en la que JP dice qué
+        número no era ruido y por qué. Esa conversación -leer el número
+        contra self.abiertos[tanda] y juntar la explicación, texto o
+        audio- la maneja la tarea 11; lo que hace con lo que JP contesta
+        es rever_ruido(), acá al lado.
+
+        Sin correos no hay tanda ni botones: no hay nada para confirmar
+        ni para rever, y una tanda sin un resumen real detrás es un
+        botón fantasma (mismo hallazgo que armar_resumen, ronda 2).
+        """
+        if not correos:
+            return (f"{self.SALUDO['ruido']} No archivé nada como ruido.",
+                    {"inline_keyboard": []})
+
+        import secrets
+        tanda = secrets.token_hex(2)
+        cabecera = [f"{self.SALUDO['ruido']} Son {len(correos)}."]
+        lineas = [f"  {n}. {html.escape(c['de'][:34])} — "
+                 f"{html.escape(c['asunto'][:44])}"
+                 for n, c in enumerate(correos, 1)]
+        texto = "\n".join(cabecera + lineas)
+
+        if len(texto) > LIMITE_TELEGRAM:
+            # Mismo criterio que el colapso del equipo en armar_resumen:
+            # se corta con un aviso explícito de cuántos quedaron
+            # afuera, nunca en silencio. A diferencia de ahí, lo que se
+            # omite acá JP no lo puede Rever desde este mensaje -haría
+            # falta ir a la casilla-, así que el aviso lo dice.
+            base = "\n".join(cabecera)
+            presupuesto = LIMITE_TELEGRAM - len(base) - 120
+            incluidas, largo = [], 0
+            for linea in lineas:
+                if largo + len(linea) + 1 > presupuesto:
+                    break
+                incluidas.append(linea)
+                largo += len(linea) + 1
+            faltan = len(lineas) - len(incluidas)
+            aviso = ([f"  … y {faltan} más, sin listar por espacio -para"
+                      f" Rever alguno de ésos hace falta ir a la casilla-"]
+                     if faltan else [])
+            texto = "\n".join(cabecera + incluidas + aviso)
+
+        # Misma tanda que usa armar_resumen: el token identifica esta
+        # entrega, y self.abiertos dice a qué correos se refiere -acá
+        # los mismos que se archivaron, aunque no todos se hayan
+        # listado por espacio, igual que el equipo en armar_resumen.
+        self.abiertos[tanda] = [c["message_id"] for c in correos]
+        teclado = {"inline_keyboard": [[
+            {"text": "✅ Confirmar", "callback_data": f"c|{tanda}-0|ruido"},
+            {"text": "🔁 Rever", "callback_data": f"r|{tanda}-0|ruido"}]]}
+        return texto, teclado
+
+    def _mandar_resumen_de_ruido(self):
+        """El envío del resumen de ruido: sólo lo archivado hoy, con
+        armar_resumen_de_ruido() -nunca el combinado de manana/tarde-.
+        Antes de esta tarea "ruido" mandaba el mismo resumen general de
+        siempre, sólo con otro saludo; separado en su propio método por
+        la misma razón que _mandar_resumen_grande: mandar_resumen()
+        decide QUÉ camino corresponde, no arma el contenido.
+        """
+        correos = memoria.del_dia(self.cx, "archivado", "")
+        texto, teclado = self.armar_resumen_de_ruido(correos)
+        resultado = self.enviar(texto, teclado)
+        if resultado and correos:
+            # Mismo cuidado que en el camino general: si Telegram no
+            # confirma el envío, no se marca nada -se reintenta entero
+            # la próxima vez en vez de dar por vistos correos que JP
+            # nunca vio.
+            memoria.cambiar_lote(self.cx, [c["message_id"] for c in correos],
+                                 "en_resumen")
+
     def mandar_resumen(self, momento):
         """Junta lo pendiente de resumir y lo manda por Telegram.
 
@@ -795,6 +910,15 @@ class Secretaria:
         ruido que ya se movió a INBOX.Ruido). Lo que ya se avisó al
         toque (avisar_en_el_momento) no vuelve a aparecer acá: ya lo
         vio.
+
+        El momento "ruido" es distinto de los otros dos y se resuelve
+        aparte (_mandar_resumen_de_ruido): es la lista numerada de lo
+        archivado hoy con los botones Confirmar/Rever, no el resumen
+        combinado de JP + derivar + equipo + ruido. Mezclarlos sería
+        precisamente lo que el hallazgo de la ronda 1 (ver
+        NoMandaUnaAndanadaSiSePerdieronVarios en test_secretaria.py) ya
+        identificó como un problema: "Lo que archivé hoy" sobre un
+        resumen que en realidad trae de vuelta correos de JP.
 
         Sin corte por fecha (desde="") a propósito: si algo quedara sin
         resumir por algún borde no previsto, tiene que aparecer en el
@@ -812,6 +936,9 @@ class Secretaria:
         mandaba 67 mensajes con 1000 correos y 70 accionables porque
         troceaba todo junto, sin distinguir lo accionable del grueso.
         """
+        if momento == "ruido":
+            return self._mandar_resumen_de_ruido()
+
         correos = (memoria.del_dia(self.cx, "clasificado", "") +
                    memoria.del_dia(self.cx, "archivado", ""))
 
@@ -828,11 +955,103 @@ class Secretaria:
                                      "en_resumen")
             return
 
-        mios = [c for c in correos if c["categoria"] == "TUYO"]
-        derivar = [c for c in correos if c["categoria"] in ("ENZO", "NATALIA")]
-        equipo = [c for c in correos if c["categoria"] == "DELEGADO"]
-        ruido = [c for c in correos if c["categoria"] == "RUIDO"]
+        mios = [c for c in correos if _categoria_de_resumen(c) == "TUYO"]
+        derivar = [c for c in correos
+                  if _categoria_de_resumen(c) in ("ENZO", "NATALIA")]
+        equipo = [c for c in correos if _categoria_de_resumen(c) == "DELEGADO"]
+        ruido = [c for c in correos if _categoria_de_resumen(c) == "RUIDO"]
         self._mandar_resumen_grande(momento, mios, derivar, equipo, ruido)
+
+    # Categorías con las que corresponde hacer algo -TUYO/ENZO/NATALIA
+    # interrumpen o esperan al resumen, DELEGADO lo maneja el equipo-,
+    # a diferencia de RUIDO (otra vez, después de que JP dijo que no),
+    # DUDA y ERROR, que necesitan que JP decida y por eso rever_ruido()
+    # las muestra en el momento en vez de dejarlas esperando un resumen
+    # que no sabría cómo contarlas.
+    CATEGORIAS_ACCIONABLES = ("TUYO", "ENZO", "NATALIA", "DELEGADO")
+
+    def rever_ruido(self, message_id, explicacion):
+        """El circuito de corrección del resumen de ruido: JP dice que
+        un correo archivado no era ruido, y de acá en más no lo es.
+
+        Tres pasos, EN ESTE ORDEN -el orden es lo que garantiza la regla
+        de oro: nunca se queda en Ruido después de que JP dijo que no lo
+        era-:
+
+          1. Vuelve a la bandeja, sin leer (correo.devolver_a_bandeja).
+             Va PRIMERO y sin condicionar nada de lo que sigue: si el
+             paso 2 revienta, esto ya pasó y no hay reversa. Respeta
+             puede_escribir() como cualquier escritura en la casilla; si
+             el freno está puesto se levanta SecretariaFrenada -a
+             diferencia del ciclo automático, que simplemente espera al
+             próximo intento, esto lo disparó JP ahora, y quedarse mudo
+             sería la misma falla silenciosa de siempre.
+
+          2. Se reclasifica con la explicación de JP como contexto
+             extra -la misma clasificador.clasificar() de siempre, así
+             que el reintento con espera ante un 429 ya viene incluido,
+             sin armar una llamada aparte-. Si el motor no contesta, la
+             categoría nueva queda "ERROR": el silencio no es una
+             categoría, tampoco acá.
+
+          3. Se guarda la corrección (memoria.corregir): categoria_jp y
+             la explicación de JP TAL CUAL la mandó -texto o, si vino
+             por audio, ya transcripta por quien llama (bot.transcribir,
+             tarea 11)-. corregir() no toca `categoria`: es lo que dijo
+             el sistema la primera vez, y hace falta conservarlo para
+             medir si mejora. Si la categoría nueva es accionable
+             -TUYO, ENZO, NATALIA, DELEGADO- el correo vuelve a
+             "clasificado" para que el PRÓXIMO resumen lo muestre donde
+             corresponde -por eso armar_resumen mira categoria_jp antes
+             que categoria, ver _categoria_de_resumen: si no, quedaba
+             contado como ruido para siempre-. Si no -RUIDO otra vez,
+             DUDA, o ERROR- se le muestra a JP en el momento
+             (avisar_para_que_decida): que el sistema no haya aceptado
+             la corrección de JP es justo lo que no puede pasar en
+             silencio.
+
+        Si el paso 1 revienta de verdad -CopiaRechazada, EscrituraRechazada
+        u OperacionAMedias, ninguna es el False benigno de "ya no
+        estaba"- la excepción sube tal cual y acá no se guarda nada: ni
+        la reclasificación ni la corrección corren, porque no hay nada
+        confirmado todavía y guardar la corrección igual mentiría "ya no
+        es ruido" de un correo que puede seguir en Ruido.
+
+        Devuelve la categoría nueva.
+        """
+        fila = memoria.obtener(self.cx, message_id)
+        if fila is None:
+            raise ValueError(f"no conozco el correo {message_id!r}")
+        if not self.puede_escribir():
+            raise SecretariaFrenada(
+                f"{message_id}: no puedo devolverlo a la bandeja con el"
+                " freno puesto -en seco o en pausa-")
+
+        correo.devolver_a_bandeja(fila)
+
+        # El correo real, con lo que JP acaba de decir como contexto
+        # extra delante del cuerpo -clasificador.clasificar() no tiene
+        # un parámetro aparte para esto, y agregar uno lo obligaría a
+        # armar el prompt distinto según quien llame-. El resto de los
+        # campos (de/para/cc/asunto/adjuntos) quedan igual: son los que
+        # ya se guardaron cuando se archivó.
+        contexto = dict(fila, cuerpo=(
+            f"JP acaba de decir, sobre ESTE correo: «{explicacion}»\n\n"
+            f"{fila.get('cuerpo') or ''}"))
+        try:
+            pred = clasificador.clasificar(clasificador.prompt_sistema(),
+                                           contexto)
+            nueva = pred["categoria"]
+        except Exception:
+            nueva = "ERROR"
+
+        memoria.corregir(self.cx, message_id, nueva, explicacion)
+        if nueva in self.CATEGORIAS_ACCIONABLES:
+            memoria.cambiar(self.cx, message_id, "clasificado")
+        else:
+            memoria.cambiar(self.cx, message_id, "mostrado_sin_clasificar")
+            self.avisar_para_que_decida(fila)
+        return nueva
 
     def atender(self, update):
         raise NotImplementedError("tarea 11")

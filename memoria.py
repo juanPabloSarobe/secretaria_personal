@@ -235,6 +235,25 @@ def del_dia(cx, sit, desde):
             " ORDER BY visto", (sit, desde))]
 
 
+def obtener(cx, message_id):
+    """La fila entera de un correo, como dict, o None si no está.
+
+    A diferencia de del_dia()/pendientes(), acá los adjuntos se
+    devuelven decodificados -una lista, no el JSON que guarda anotar()-
+    porque quien llama a esto (Rever, en secretaria.py) reconstruye el
+    dict que le pasa a clasificador.clasificar(), y ese código espera
+    poder iterarlos como adjuntos, no como texto.
+    """
+    with _CANDADO:
+        f = cx.execute("SELECT * FROM correos WHERE message_id = ?",
+                       (message_id,)).fetchone()
+    if not f:
+        return None
+    fila = dict(f)
+    fila["adjuntos"] = json.loads(fila["adjuntos"] or "[]")
+    return fila
+
+
 def corregir(cx, message_id, categoria_nueva, explicacion):
     """Guarda que JP dijo otra cosa, y por qué.
 

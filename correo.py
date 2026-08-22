@@ -68,6 +68,27 @@ class CopiaRechazada(Exception):
     """
 
 
+class EscrituraRechazada(Exception):
+    """El servidor rechazó una escritura en Ruido antes de que hubiera
+    nada copiado a INBOX.
+
+    Es el equivalente de CopiaRechazada para el paso que le precede: en
+    `devolver_a_bandeja()` primero se saca el `\\Seen` en Ruido y recién
+    después se copia a INBOX. Un NO en ese primer STORE no dejó ninguna
+    copia en ningún lado -es exactamente la misma garantía que
+    CopiaRechazada documenta para el COPY-, pero no es un COPY el que
+    falló, así que reusar esa excepción diría algo que no pasó. La
+    consecuencia es la misma: reintentar `devolver_a_bandeja()` entera
+    es seguro.
+
+    Y es distinta del False que devuelve cuando el mensaje ya no está en
+    Ruido: eso es benigno -nada para reintentar-; esto es una falla real
+    del servidor -permisos, un timeout parcial- que hay que reintentar y,
+    si no se arregla, contarle a JP. Confundirlas deja el correo sin
+    volver a la bandeja, sin reintento y sin aviso.
+    """
+
+
 class IdentidadIncierta(Exception):
     """No se pudo confirmar que el mensaje sea el que creíamos.
 
@@ -725,12 +746,24 @@ def devolver_a_bandeja(c):
     principio -en el peor caso deja un duplicado sin leer en INBOX y el
     original todavía en Ruido, nunca un correo perdido o mal marcado.
 
+    Devuelve True si terminó, y False SOLO en el caso benigno: el mensaje
+    ya no está en Ruido. Todo lo que sí es una falla sale por una
+    excepción -EscrituraRechazada si el servidor rechazó sacar el
+    `\\Seen` antes de copiar nada, CopiaRechazada si rechazó el COPY a
+    INBOX, OperacionAMedias si copió pero no pudo borrar el original en
+    Ruido- porque un booleano de dos valores confundía "no había nada
+    que hacer" con "el servidor dijo que no", que necesitan respuestas
+    opuestas: la primera no se reintenta, la segunda sí y, si persiste,
+    JP se entera. Mismo criterio que `mover_a()`.
+
     Los CUATRO comandos de escritura se chequean, no sólo el COPY: los
     dos primeros (STORE -Seen, COPY) todavía no cambiaron nada del lado
-    de Ruido si fallan, así que un NO ahí es simplemente False, seguro
-    de reintentar desde cero. Los dos últimos (STORE +Deleted, EXPUNGE)
-    corren DESPUÉS de que el COPY ya confirmó una copia nueva en INBOX:
-    un NO en cualquiera de esos dos deja un duplicado -mismo caso que en
+    de Ruido si fallan, así que un NO ahí no dejó ningún duplicado y es
+    seguro reintentar la operación entera desde cero -pero eso no es lo
+    mismo que "no había nada que hacer", así que sale por excepción y no
+    por False. Los dos últimos (STORE +Deleted, EXPUNGE) corren DESPUÉS
+    de que el COPY ya confirmó una copia nueva en INBOX: un NO en
+    cualquiera de esos dos deja un duplicado -mismo caso que en
     mover_a- y levanta OperacionAMedias en vez de mentir con un booleano.
 
     Acá el mensaje se ubica SIEMPRE por identidad y nunca por el UID
@@ -747,13 +780,21 @@ def devolver_a_bandeja(c):
         uid = _buscar_por_identidad(M, c)
         if not uid:
             return False
-        typ, _ = M.uid("STORE", uid, "-FLAGS", "(\\Seen)")
+        typ, respuesta = M.uid("STORE", uid, "-FLAGS", "(\\Seen)")
         if typ != "OK":
-            # Todavía no se copió nada: seguro reintentar desde cero.
-            return False
-        typ, _ = M.uid("COPY", uid, "INBOX")
+            # Nada se copió todavía: es seguro reintentar desde cero,
+            # pero no es "no había nada que hacer" -eso confundía un
+            # rechazo real del servidor con el caso benigno.
+            raise EscrituraRechazada(
+                f"{quien}: el servidor rechazó sacar el \\Seen en Ruido"
+                f" -- {_motivo(respuesta)}")
+        typ, respuesta = M.uid("COPY", uid, "INBOX")
         if typ != "OK":
-            return False
+            # Nada se copió: mismo caso que CopiaRechazada en mover_a,
+            # con la carpeta de destino invertida.
+            raise CopiaRechazada(
+                f"{quien}: el servidor rechazó copiar a INBOX"
+                f" -- {_motivo(respuesta)}")
         typ, _ = M.uid("STORE", uid, "+FLAGS", "(\\Deleted)")
         if typ != "OK":
             raise OperacionAMedias(

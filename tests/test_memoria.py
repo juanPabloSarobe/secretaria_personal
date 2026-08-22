@@ -143,6 +143,43 @@ class Correcciones(unittest.TestCase):
         self.assertEqual(fila["situacion"], "corregido")
 
 
+class Obtener(unittest.TestCase):
+    """La fila completa de un correo, para reconstruir el dict que
+    necesitan correo.devolver_a_bandeja() y clasificador.clasificar()
+    -Rever (secretaria.py) los usa a los dos-."""
+
+    def setUp(self):
+        self.f = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.cx = memoria.abrir(self.f.name)
+
+    def tearDown(self):
+        self.cx.close()
+        os.unlink(self.f.name)
+
+    def test_devuelve_la_fila_como_dict(self):
+        memoria.anotar(self.cx, un_correo(), "RUIDO", "parecía promo")
+        fila = memoria.obtener(self.cx, "<a@b.com>")
+        self.assertEqual(fila["de"], "a@b.com")
+        self.assertEqual(fila["asunto"], "Prueba")
+        self.assertEqual(fila["categoria"], "RUIDO")
+
+    def test_los_adjuntos_vuelven_como_lista_no_como_texto_json(self):
+        """anotar() los guarda serializados con json.dumps -la columna es
+        TEXT-; si obtener() los devolviera tal cual, clasificador.clasificar()
+        reventaría al iterar un string como si fuera la lista de adjuntos."""
+        c = un_correo()
+        c["adjuntos"] = [{"nombre": "remito.pdf", "tipo": "application/pdf",
+                          "kb": 80}]
+        memoria.anotar(self.cx, c, "TUYO", "cliente")
+        fila = memoria.obtener(self.cx, "<a@b.com>")
+        self.assertEqual(fila["adjuntos"],
+                         [{"nombre": "remito.pdf", "tipo": "application/pdf",
+                           "kb": 80}])
+
+    def test_un_message_id_que_no_existe_da_none(self):
+        self.assertIsNone(memoria.obtener(self.cx, "<no-existe@x>"))
+
+
 class Intentos(unittest.TestCase):
     """El contador de intentos de archivado vive en la base y no en la
     memoria del proceso: los reintentos tienen que sobrevivir a un

@@ -304,5 +304,226 @@ class LaAndanadaDeLaRonda2(unittest.TestCase):
                              "en_resumen")
 
 
+class ArmarResumenDeRuido(unittest.TestCase):
+    """El resumen de las 18:00: sólo lo archivado, en lista NUMERADA -a
+    diferencia del pie de armar_resumen(), que sólo cuenta- y con
+    exactamente dos botones: Confirmar (todos fueron ruido) y Rever."""
+
+    def setUp(self):
+        f = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.s = secretaria.Secretaria(cx=memoria.abrir(f.name))
+
+    def _ruido(self, n):
+        return [fila(f"<r{i}@x>", f"Promo bien distintiva {i}", "RUIDO",
+                     de=f"promo{i}@ejemplo.com") for i in range(n)]
+
+    def test_sin_nada_no_hay_botones(self):
+        texto, teclado = self.s.armar_resumen_de_ruido([])
+        self.assertIn("no archivé nada", texto.lower())
+        self.assertEqual(teclado["inline_keyboard"], [])
+
+    def test_lista_numerada_con_confirmar_y_rever(self):
+        correos = self._ruido(3)
+        texto, teclado = self.s.armar_resumen_de_ruido(correos)
+        for i, c in enumerate(correos, 1):
+            self.assertIn(f"{i}.", texto)
+            self.assertIn(c["asunto"], texto)
+        botones = teclado["inline_keyboard"][0]
+        textos = [b["text"] for b in botones]
+        self.assertEqual(len(botones), 2)
+        self.assertTrue(any("onfirmar" in t for t in textos))
+        self.assertTrue(any("ever" in t for t in textos))
+
+    def test_la_tanda_queda_registrada_para_los_tres_correos(self):
+        correos = self._ruido(3)
+        _, teclado = self.s.armar_resumen_de_ruido(correos)
+        callback = teclado["inline_keyboard"][0][0]["callback_data"]
+        tanda = callback.split("|")[1].split("-")[0]
+        self.assertEqual(self.s.abiertos[tanda],
+                         [c["message_id"] for c in correos])
+
+    def test_callback_data_entra_en_64_bytes(self):
+        _, teclado = self.s.armar_resumen_de_ruido(self._ruido(1))
+        for boton in teclado["inline_keyboard"][0]:
+            self.assertLessEqual(len(boton["callback_data"].encode()), 64)
+
+    def test_con_muchos_no_supera_el_limite_y_avisa_lo_omitido(self):
+        correos = self._ruido(200)
+        texto, _ = self.s.armar_resumen_de_ruido(correos)
+        self.assertLessEqual(len(texto), secretaria.LIMITE_TELEGRAM)
+        self.assertIn("más", texto)
+
+
+class MandarResumenDeRuido(unittest.TestCase):
+    """mandar_resumen("ruido") usa armar_resumen_de_ruido() con SÓLO lo
+    archivado -no el combinado de manana/tarde-, que es justo lo que
+    esta tarea agrega: antes "ruido" mandaba el mismo resumen general,
+    sólo con otro saludo."""
+
+    def setUp(self):
+        f = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.s = secretaria.Secretaria(cx=memoria.abrir(f.name))
+        memoria.anotar(self.s.cx, correo_falso("<1@x>", "Promo"), "RUIDO", "r")
+        memoria.cambiar(self.s.cx, "<1@x>", "archivado")
+        # Un correo TUYO todavía sin resumir: no tiene que aparecer en
+        # el resumen de ruido -eso confundiría "esto es lo que archivé"
+        # con la bandeja de JP-, y tiene que seguir "clasificado" para
+        # que lo levante el próximo resumen general.
+        memoria.anotar(self.s.cx, correo_falso("<2@x>", "Mío"), "TUYO", "m")
+
+    def test_solo_manda_lo_archivado(self):
+        with mock.patch.object(self.s, "enviar",
+                                return_value={"ok": True}) as enviar:
+            self.s.mandar_resumen("ruido")
+        texto = enviar.call_args[0][0]
+        self.assertIn("Promo", texto)
+        self.assertNotIn("Mío", texto)
+
+    def test_marca_lo_archivado_pero_no_toca_lo_pendiente(self):
+        with mock.patch.object(self.s, "enviar", return_value={"ok": True}):
+            self.s.mandar_resumen("ruido")
+        self.assertEqual(memoria.situacion(self.s.cx, "<1@x>"), "en_resumen")
+        self.assertEqual(memoria.situacion(self.s.cx, "<2@x>"), "clasificado")
+
+    def test_si_telegram_esta_caido_no_se_pierde(self):
+        with mock.patch.object(self.s, "enviar", return_value=None):
+            self.s.mandar_resumen("ruido")
+        self.assertEqual(memoria.situacion(self.s.cx, "<1@x>"), "archivado")
+
+
+class ReverRuido(unittest.TestCase):
+    """El circuito de corrección: JP dice que un correo archivado no era
+    ruido. Adaptado del test del brief -que mockea devolver_a_bandeja
+    con `return_value=True` y comprueba `assert_called_once_with(
+    "<r@x>")`, un Message-ID pelado-: correo.devolver_a_bandeja(c)
+    necesita el correo ENTERO (identidad(c) hace c.get(...), y un string
+    no tiene .get), así que acá se verifica que se lo llama con el
+    correo reconstruido desde la base, no con el Message-ID solo. Con el
+    freno seco puesto (el valor por defecto) puede_escribir() da False,
+    así que estos tests sacan el freno como cualquier test que escribe
+    en la casilla (ver EnSecoLoImpide en test_secretaria.py)."""
+
+    def setUp(self):
+        f = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.s = secretaria.Secretaria(cx=memoria.abrir(f.name))
+        memoria.anotar(self.s.cx,
+                       {"message_id": "<r@x>", "uid": "1", "de": "sipago@x",
+                        "para": "jp@x", "cc": "", "asunto": "Manual",
+                        "fecha": "", "cuerpo": "texto", "adjuntos": []},
+                       "RUIDO", "parecía promo")
+        memoria.cambiar(self.s.cx, "<r@x>", "archivado")
+
+    def test_vuelve_a_la_bandeja_se_reclasifica_y_guarda_el_motivo(self):
+        """Sacarlo de Ruido y dejarlo ahí sería devolverle el trabajo a JP."""
+        with mock.patch.object(secretaria, "EN_SECO", False), \
+             mock.patch.object(secretaria.correo, "devolver_a_bandeja",
+                               return_value=True) as devolver, \
+             mock.patch.object(secretaria.clasificador, "clasificar",
+                               return_value={"categoria": "NATALIA",
+                                             "motivo": "cobros", "unanime": True}):
+            nueva = self.s.rever_ruido("<r@x>", "SiPago es mi proveedor de cobros")
+        devolver.assert_called_once()
+        self.assertEqual(devolver.call_args[0][0]["message_id"], "<r@x>")
+        self.assertEqual(nueva, "NATALIA")
+        f = self.s.cx.execute("SELECT categoria, categoria_jp, explicacion"
+                              " FROM correos WHERE message_id='<r@x>'").fetchone()
+        self.assertEqual(f["categoria"], "RUIDO")
+        self.assertEqual(f["categoria_jp"], "NATALIA")
+        self.assertIn("cobros", f["explicacion"])
+
+    def test_si_es_natalia_queda_pendiente_de_derivar(self):
+        """La tercera cosa que Rever tiene que garantizar: no alcanza con
+        sacarlo de Ruido, tiene que APARECER para derivar en el próximo
+        resumen -si no, es trabajo que vuelve a caerle a JP."""
+        with mock.patch.object(secretaria, "EN_SECO", False), \
+             mock.patch.object(secretaria.correo, "devolver_a_bandeja",
+                               return_value=True), \
+             mock.patch.object(secretaria.clasificador, "clasificar",
+                               return_value={"categoria": "NATALIA",
+                                             "motivo": "cobros", "unanime": True}):
+            self.s.rever_ruido("<r@x>", "SiPago es mi proveedor de cobros")
+        self.assertEqual(memoria.situacion(self.s.cx, "<r@x>"), "clasificado")
+        correos = memoria.del_dia(self.s.cx, "clasificado", "")
+        texto, _ = self.s.armar_resumen(correos, "tarde")
+        self.assertIn("Para derivar", texto)
+        self.assertIn("Manual", texto)
+        self.assertNotIn("Archivado como ruido", texto)
+
+    def test_el_orden_manda_si_la_reclasificacion_revienta_igual_vuelve(self):
+        """Si la reclasificación falla, el correo vuelve igual -nunca se
+        queda en Ruido después de que JP dijo que no era ruido-. La
+        garantía es de ORDEN: devolver_a_bandeja corre primero y sin
+        condicionarse a lo que pase después."""
+        with mock.patch.object(secretaria, "EN_SECO", False), \
+             mock.patch.object(secretaria.correo, "devolver_a_bandeja",
+                               return_value=True) as devolver, \
+             mock.patch.object(secretaria.clasificador, "clasificar",
+                               side_effect=RuntimeError("cuota agotada")), \
+             mock.patch.object(self.s, "avisar_para_que_decida") as avisar:
+            nueva = self.s.rever_ruido("<r@x>", "no me acuerdo bien por qué")
+        devolver.assert_called_once()
+        self.assertEqual(nueva, "ERROR")
+        avisar.assert_called_once()
+        f = self.s.cx.execute("SELECT categoria_jp, explicacion, situacion"
+                              " FROM correos WHERE message_id='<r@x>'").fetchone()
+        self.assertEqual(f["categoria_jp"], "ERROR")
+        self.assertIn("no me acuerdo", f["explicacion"])
+        self.assertEqual(f["situacion"], "mostrado_sin_clasificar")
+
+    def test_si_devolver_a_la_bandeja_revienta_no_se_guarda_nada(self):
+        """Al revés del caso anterior: si el que revienta es el paso 1
+        -una falla real del servidor, no el benigno "no estaba"- no hay
+        nada confirmado todavía. Guardar la corrección igual mentiría:
+        diría "ya no es ruido" de un correo que puede seguir en Ruido."""
+        with mock.patch.object(secretaria, "EN_SECO", False), \
+             mock.patch.object(
+                 secretaria.correo, "devolver_a_bandeja",
+                 side_effect=secretaria.correo.CopiaRechazada("no hay cuota")), \
+             mock.patch.object(secretaria.clasificador, "clasificar") as cl:
+            with self.assertRaises(secretaria.correo.CopiaRechazada):
+                self.s.rever_ruido("<r@x>", "SiPago es mi proveedor de cobros")
+        cl.assert_not_called()
+        f = self.s.cx.execute("SELECT categoria_jp, situacion FROM correos"
+                              " WHERE message_id='<r@x>'").fetchone()
+        self.assertIsNone(f["categoria_jp"])
+        self.assertEqual(f["situacion"], "archivado")
+
+    def test_la_explicacion_se_guarda_igual_venga_de_texto_o_de_audio(self):
+        """bot.transcribir() -tarea 11- ya convirtió el audio a texto
+        antes de llegar acá: para rever_ruido() las dos formas son la
+        misma cadena, y se guarda tal cual, sin tocarla."""
+        transcripcion = "esto lo dije por audio, sipago es de cobros"
+        with mock.patch.object(secretaria, "EN_SECO", False), \
+             mock.patch.object(secretaria.correo, "devolver_a_bandeja",
+                               return_value=True), \
+             mock.patch.object(secretaria.clasificador, "clasificar",
+                               return_value={"categoria": "NATALIA",
+                                             "motivo": "m", "unanime": True}):
+            self.s.rever_ruido("<r@x>", transcripcion)
+        f = self.s.cx.execute("SELECT explicacion FROM correos"
+                              " WHERE message_id='<r@x>'").fetchone()
+        self.assertEqual(f["explicacion"], transcripcion)
+
+    def test_con_el_freno_puesto_no_toca_la_casilla(self):
+        """rever_ruido() lo dispara JP a mano, ahora: quedarse callado
+        con el freno puesto sería la misma falla silenciosa de siempre,
+        JP cree que tocó Rever y no pasó nada."""
+        with mock.patch.object(secretaria, "EN_SECO", True), \
+             mock.patch.object(secretaria.correo,
+                               "devolver_a_bandeja") as devolver:
+            with self.assertRaises(secretaria.SecretariaFrenada):
+                self.s.rever_ruido("<r@x>", "explicación")
+        devolver.assert_not_called()
+
+    def test_pausada_tampoco_toca_la_casilla(self):
+        self.s.pausada = True
+        with mock.patch.object(secretaria, "EN_SECO", False), \
+             mock.patch.object(secretaria.correo,
+                               "devolver_a_bandeja") as devolver:
+            with self.assertRaises(secretaria.SecretariaFrenada):
+                self.s.rever_ruido("<r@x>", "explicación")
+        devolver.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

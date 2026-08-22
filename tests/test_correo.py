@@ -701,10 +701,11 @@ class MarcarLeido(unittest.TestCase):
         self.assertEqual([c[0] for c in fake.comandos], ["FETCH", "SEARCH"])
 
     def test_si_el_store_no_confirma_devuelve_false(self):
-        """Mismo patrón que en mover_a/devolver_a_bandeja: acá no hay
-        COPY de por medio, así que un STORE que el servidor no confirma
-        no deja ningún duplicado -alcanza con False, sin necesidad de
-        OperacionAMedias."""
+        """A diferencia de devolver_a_bandeja(), acá no hay COPY de por
+        medio -es el único comando de escritura de toda la función-, así
+        que un STORE que el servidor no confirma no deja ningún
+        duplicado ni ninguna ambigüedad que resolver: alcanza con False,
+        sin necesidad de una excepción nueva ni de OperacionAMedias."""
         fake = _IMAPFalso(store_ok=False)
         with mock.patch.object(correo, "abrir_buzon", return_value=fake):
             ok = correo.marcar_leido(un_correo())
@@ -768,15 +769,46 @@ class DevolverABandeja(unittest.TestCase):
     def test_con_copy_no_el_correo_sigue_en_ruido(self):
         """Mismo bug que mover_a: si el COPY a INBOX no se confirma, el
         correo no puede desaparecer de Ruido sin haber llegado a ningún
-        lado."""
+        lado. (Antes esto devolvía False; ahora levanta CopiaRechazada
+        -ver el test de abajo-, el que no se borre nada no cambió.)"""
         fake = _IMAPFalso(copy_ok=False, mid="<r@x>", carpeta="INBOX.Ruido")
         with mock.patch.object(correo.imaplib, "IMAP4_SSL", return_value=fake):
-            ok = correo.devolver_a_bandeja(un_correo("<r@x>"))
-        self.assertFalse(ok)
+            with self.assertRaises(correo.CopiaRechazada):
+                correo.devolver_a_bandeja(un_correo("<r@x>"))
         nombres = [c[0] for c in fake.comandos]
         self.assertEqual(nombres, ["SEARCH", "FETCH", "STORE", "COPY"])
         self.assertNotIn("EXPUNGE", nombres)
         self.assertEqual(fake.cuenta("INBOX.Ruido"), 1)
+
+    def test_un_copy_rechazado_no_se_confunde_con_un_correo_que_no_esta(self):
+        """Los dos casos devolvían False y no son la misma cosa: que el
+        mensaje ya no esté en Ruido es benigno -alguien ya lo devolvió,
+        o lo borró a mano- y no hay nada para reintentar ni para avisar;
+        que el servidor rechace el COPY es una falla real que hay que
+        reintentar y, si no se arregla, contarle a JP. Leerlos igual
+        dejaba el segundo caso marcado como resuelto, sin reintento y
+        sin aviso: un correo que JP dijo que no era ruido, sin volver a
+        la bandeja y sin que nadie se entere."""
+        vacio = _IMAPFalso(uid_buscado=None, carpeta="INBOX.Ruido")
+        with mock.patch.object(correo.imaplib, "IMAP4_SSL", return_value=vacio):
+            self.assertIs(correo.devolver_a_bandeja(un_correo("<no-existe@x>")),
+                          False)
+
+        rechaza = _IMAPFalso(copy_ok=False, mid="<r@x>", carpeta="INBOX.Ruido")
+        with mock.patch.object(correo.imaplib, "IMAP4_SSL", return_value=rechaza):
+            with self.assertRaises(correo.CopiaRechazada):
+                correo.devolver_a_bandeja(un_correo("<r@x>"))
+
+    def test_el_error_repite_lo_que_contesto_el_servidor(self):
+        """"No se pudo copiar" no le sirve a nadie; el texto exacto del
+        servidor sí se entiende y se arregla, y es el que termina en el
+        aviso de Telegram."""
+        fake = _IMAPFalso(copy_ok=False, mid="<r@x>", carpeta="INBOX.Ruido")
+        with mock.patch.object(correo.imaplib, "IMAP4_SSL", return_value=fake):
+            with self.assertRaises(correo.CopiaRechazada) as caso:
+                correo.devolver_a_bandeja(un_correo("<r@x>"))
+        self.assertIn("TRYCREATE", str(caso.exception))
+        self.assertIn("INBOX", str(caso.exception))
 
     def test_busca_por_message_id_no_por_numero(self):
         fake = _IMAPFalso(mid="<r@x>", carpeta="INBOX.Ruido")
@@ -796,14 +828,19 @@ class DevolverABandeja(unittest.TestCase):
 
     def test_si_el_store_menos_seen_no_confirma_no_copia_nada(self):
         """Todavía no se tocó Ruido de ningún modo -el COPY ni siquiera
-        se intentó-, así que un NO acá es simplemente False: seguro
-        reintentar desde cero."""
+        se intentó-, así que es seguro reintentar desde cero. Pero eso
+        no es lo mismo que "no había nada que hacer" -el correo sigue
+        en Ruido y el servidor dijo que no-, así que sale por
+        EscrituraRechazada y no por False (antes confundía las dos
+        cosas: ver test_un_copy_rechazado_no_se_confunde_con_un_correo_
+        que_no_esta, mismo criterio un paso antes)."""
         fake = _IMAPFalso(store_ok=False, mid="<r@x>", carpeta="INBOX.Ruido")
         with mock.patch.object(correo.imaplib, "IMAP4_SSL", return_value=fake):
-            ok = correo.devolver_a_bandeja(un_correo("<r@x>"))
-        self.assertFalse(ok)
+            with self.assertRaises(correo.EscrituraRechazada):
+                correo.devolver_a_bandeja(un_correo("<r@x>"))
         self.assertEqual([c[0] for c in fake.comandos],
                          ["SEARCH", "FETCH", "STORE"])
+        self.assertEqual(fake.cuenta("INBOX.Ruido"), 1)
 
     def test_con_store_deleted_no_queda_a_medias(self):
         """El hermano del Crítico 1, acá también: con el COPY a INBOX ya
