@@ -34,6 +34,16 @@ CADA = 180                    # cada cuánto mira la casilla, en segundos
 # -archivado o avisado- mucho antes de salirse de la ventana.
 INTENTOS_MAXIMOS = 5
 POLL_HILOS = 1                 # cada cuánto arrancar() se fija que sigan vivos
+
+# Cuánto silencio cuenta como "estuvo caída". El ciclo late cada CADA
+# segundos, así que un hueco de cinco vueltas ya no es un tropiezo de
+# red: es el proceso muerto -o la Mac dormida- el rato suficiente como
+# para que JP tenga que enterarse. El diseño §8 lo pide con todas las
+# letras: "si la secretaria estuvo caída, el resumen lo dice y desde
+# cuándo". Es el antídoto que el propio diseño propone contra la falla
+# que más preocupa, la silenciosa, porque no recibir avisos se parece
+# demasiado a un día tranquilo.
+HUECO_CAIDA = 5 * CADA
 HORA_INICIO, HORA_FIN = 8, 19
 
 MOMENTOS = [("manana", 8, 30), ("tarde", 17, 0), ("ruido", 18, 0)]
@@ -162,7 +172,25 @@ class Secretaria:
     def __init__(self, cx=None):
         self.cx = cx or memoria.abrir()
         self.reloj = Reloj()
-        self.ultimo_reloj = datetime.now()
+        # De dónde retoma el reloj: del último latido que quedó en la
+        # base, NO de "ahora". launchd tiene KeepAlive y arrancar() sale
+        # con código 1 a propósito cuando un hilo se muere, así que
+        # reiniciar es el camino normal y no la excepción. Con
+        # datetime.now() acá, Reloj.momentos_pendientes -25 líneas
+        # dedicadas a recuperar los resúmenes de una caída larga- no
+        # corría NUNCA a través de un reinicio: la caída se borraba sola
+        # al arrancar. La tabla `latidos` se escribe en cada vuelta del
+        # ciclo desde la tarea 6 y hasta ahora sólo la leía /estado.
+        self.ultimo_reloj = self._retomar_el_reloj()
+        # Desde cuándo y hasta cuándo estuvo caída, si lo estuvo. Los
+        # pone _disparar_resumenes y los consume el primer resumen que
+        # sale de verdad (ver _encabezado_de_caida). Se guarda también
+        # el "hasta" y no se usa datetime.now() al armar el texto para
+        # que el "estuve caída N horas" salga de los dos extremos que se
+        # midieron de verdad, y no de cuándo casualmente se armó el
+        # mensaje.
+        self.caida_desde = None
+        self.caida_hasta = None
         self.offset = 0
         self.parada = threading.Event()
         self.pausada = False
@@ -191,6 +219,56 @@ class Secretaria:
         # diciendo que no entiende preguntas sueltas.
         self.pendiente = memoria.cargar_pendiente(self.cx)
 
+    def _retomar_el_reloj(self):
+        """Desde cuándo mirar para atrás al arrancar: el último latido.
+
+        Sin latido -base nueva- arranca en `ahora`, que es lo que hacía
+        antes: sin historia no hay nada que recuperar. Si el latido
+        quedó en el futuro -el reloj del sistema se corrigió para atrás
+        mientras el proceso estaba muerto- se usa `ahora` igual, por el
+        mismo motivo que _disparar_resumenes no deja retroceder el
+        reloj: un `ultimo` adelantado se arrastraría a todas las vueltas
+        siguientes.
+        """
+        ahora = datetime.now()
+        crudo = memoria.ultimo_latido(self.cx)
+        if not crudo:
+            return ahora
+        try:
+            ultimo = datetime.fromisoformat(crudo)
+        except (TypeError, ValueError):
+            # Un latido ilegible no puede impedir que arranque: lo peor
+            # que pasa volviendo a `ahora` es perder la recuperación de
+            # esa caída, que es exactamente lo que pasaba siempre antes.
+            return ahora
+        if ultimo.tzinfo is not None:
+            ultimo = ultimo.replace(tzinfo=None)
+        return min(ultimo, ahora)
+
+    def _encabezado_de_caida(self):
+        """La línea que encabeza el primer resumen después de una caída,
+        o "" si no estuvo caída.
+
+        Vale igual para el hueco de un reinicio -__init__ retoma el
+        reloj del último latido- y para uno con el proceso vivo pero
+        dormido (la Mac suspendida): desde acá los dos se ven igual, un
+        salto grande entre dos vueltas del ciclo.
+        """
+        if not self.caida_desde:
+            return ""
+        hasta = self.caida_hasta or datetime.now()
+        segundos = max((hasta - self.caida_desde).total_seconds(), 0)
+        if segundos >= 48 * 3600:
+            largo = f"{segundos / 86400:.1f} días"
+        elif segundos >= 3600:
+            largo = f"{segundos / 3600:.1f} horas"
+        else:
+            largo = f"{segundos / 60:.0f} minutos"
+        return (f"⚠️ <b>Estuve caída</b> desde el "
+                f"{self.caida_desde.strftime('%d/%m a las %H:%M')} "
+                f"-{largo}-. Puede que algo haya entrado sin que lo "
+                f"viera en el momento.")
+
     def ciclo_de_correo(self):
         while not self.parada.is_set():
             try:
@@ -198,10 +276,20 @@ class Secretaria:
                 ahora = datetime.now()
                 self._disparar_resumenes(ahora)
                 memoria.latido(self.cx, ahora.isoformat(timespec="seconds"))
-            except Exception as e:
+            except (Exception, SystemExit) as e:
                 # Nada que pase acá adentro puede matar el proceso: si se
                 # muere, JP no se entera, porque no recibir avisos se parece
                 # mucho a un día tranquilo.
+                #
+                # SystemExit y no sólo Exception: clasificador.motores()
+                # levanta SystemExit cuando no hay ningún motor
+                # configurado en el .env, y SystemExit NO hereda de
+                # Exception. Con "except Exception" a secas se escapaba
+                # de acá, mataba el hilo del correo, arrancar() salía con
+                # 1, launchd reiniciaba, y el motor seguía sin estar: un
+                # bucle de reinicio sin un solo aviso. Ya se sabía -
+                # /estado usa (Exception, SystemExit) por esto mismo-
+                # pero se había parchado un call site de dos.
                 _registrar("correo", e)
             self.parada.wait(CADA)
 
@@ -218,6 +306,8 @@ class Secretaria:
         `ultimo_reloj` adelantado y podría volver a disparar un resumen
         que ya se mandó.
         """
+        if (ahora - self.ultimo_reloj).total_seconds() > HUECO_CAIDA:
+            self.caida_desde, self.caida_hasta = self.ultimo_reloj, ahora
         pendientes = self.reloj.momentos_pendientes(ahora, self.ultimo_reloj)
         if pendientes:
             # Si se perdieron varios -una caída de días, o un fin de
@@ -230,14 +320,27 @@ class Secretaria:
             # momento se lo llamó), ese único envío ya junta todo lo
             # pendiente, no sólo lo del último corte.
             #
-            # El saludo evita "ruido" si hay otro pendiente: ese saludo
-            # es "Lo que archivé hoy", y si el contenido trae de vuelta
-            # correos de JP acumulados de varios días -típico después de
-            # una caída larga- ese texto no describe lo que hay adentro.
-            # Sólo se usa "ruido" cuando es el único momento pendiente.
-            momento = next((m for m in reversed(pendientes) if m != "ruido"),
-                           pendientes[-1])
-            self.mandar_resumen(momento)
+            # El saludo evita "ruido" para ese resumen general: ese
+            # saludo es "Lo que archivé hoy", y si el contenido trae de
+            # vuelta correos de JP acumulados de varios días -típico
+            # después de una caída larga- ese texto no describe lo que
+            # hay adentro.
+            #
+            # Pero el de ruido NO se colapsa contra el general: son dos
+            # cosas distintas y el general no lo reemplaza. El general
+            # cuenta el ruido ("Archivado como ruido: N"); el de las
+            # 18:00 es la única lista NUMERADA, la única con botón de
+            # Rever, y por lo tanto la única forma que tiene JP de sacar
+            # de Ruido algo suyo que se fue al tacho. Colapsarlos -como
+            # se hacía- borraba esa red entera cada vez que el proceso
+            # estuvo caído cruzando las 18:00. Son dos mensajes en el
+            # peor caso, no la andanada de nueve que este código evita.
+            general = next((m for m in reversed(pendientes) if m != "ruido"),
+                           None)
+            if general:
+                self.mandar_resumen(general)
+            if "ruido" in pendientes:
+                self.mandar_resumen("ruido")
         if ahora > self.ultimo_reloj:
             self.ultimo_reloj = ahora
 
@@ -248,7 +351,10 @@ class Secretaria:
                 for u in d.get("result", []):
                     self.offset = u["update_id"] + 1
                     self.atender(u)
-            except Exception as e:
+            except (Exception, SystemExit) as e:
+                # SystemExit por lo mismo que ciclo_de_correo: acá abajo
+                # se llega a clasificador (por /motor) y no hereda de
+                # Exception.
                 _registrar("escucha", e)
                 time.sleep(5)
 
@@ -424,6 +530,76 @@ class Secretaria:
                 else:
                     seguir(fila)
 
+    def _nueva_tanda(self):
+        """Un token de tanda que NO pise a ninguno de los abiertos.
+
+        Los botones de Telegram no vencen nunca: un resumen de hace
+        semanas sigue teniendo botones vivos. Con token_hex(2) son 65.536
+        valores, y `self.abiertos[tanda] = ...` asignaba sin chequear
+        nada, así que una colisión hace que un botón viejo opere sobre
+        los correos de otra tanda: medido, JP toca "Listo, lo vi" en el
+        aviso del lunes y se cierra el correo de hoy que nunca miró. En
+        una tanda de resumen es peor, porque _cerrar_equipo marca leído
+        en la casilla real.
+
+        Son dos arreglos y hacen falta los dos: token_hex(4) baja la
+        probabilidad (4.294.967.296 valores), y el chequeo contra
+        self.abiertos la lleva a cero. Sin el chequeo, "el token es
+        largo" es una apuesta; con el chequeo, es una garantía -y es lo
+        que hace que la mutación "token fijo" se caiga, en vez de
+        sobrevivir la suite entera.
+        """
+        import secrets
+        tanda = ""
+        for _ in range(64):
+            tanda = secrets.token_hex(4)
+            if tanda not in self.abiertos:
+                return tanda
+        # 64 colisiones seguidas con 2^32 valores no pasan: si pasan, el
+        # generador no está generando. Antes que devolver una tanda
+        # repetida -que es exactamente el daño que esto existe para
+        # evitar- se desempata con un sufijo. bot.es_de_esta_tanda()
+        # compara la tanda entera contra "{tanda}-{idx}", así que un
+        # sufijo no rompe el formato del callback_data.
+        n = 0
+        while f"{tanda}x{n:x}" in self.abiertos:
+            n += 1
+        return f"{tanda}x{n:x}"
+
+    def _atender_avisos_pendientes(self):
+        """La cola de avisos que el diseño §8 pide -"los avisos quedan
+        en cola y salen cuando vuelve"- y que no existía.
+
+        Un aviso al toque que Telegram no entregó marcaba el correo
+        "avisado" igual, y "avisado" no lo lee nadie: el correo de JP
+        desaparecía del sistema entero. Medido con Telegram caído sobre
+        un correo TUYO: quedaba "avisado" y el resumen de las 8:30 decía
+        "No entró nada nuevo". Ahora el que no sale queda en
+        "pendiente_de_avisar" y se reintenta acá en cada vuelta.
+
+        Sin tope de intentos, por la misma razón que _avisar_la_falla:
+        reintentar un aviso que no llegó no duplica nada -a diferencia
+        de reintentar un COPY- así que no hace falta cortar. Y si
+        Telegram no vuelve en todo el día el correo tampoco se pierde:
+        mandar_resumen() también mira esta situación, así que el resumen
+        es el segundo camino por el que ese correo llega igual.
+
+        La fila se relee con memoria.obtener() y no se usa la de
+        pendientes(): obtener() decodifica `adjuntos` a lista, que es lo
+        que espera correo.adjuntos_legibles(); el JSON crudo lo haría
+        iterar caracteres.
+        """
+        for pendiente in memoria.pendientes(self.cx, "pendiente_de_avisar"):
+            c = memoria.obtener(self.cx, pendiente["message_id"]) or pendiente
+            categoria = _categoria_de_resumen(c)
+            if categoria in ("TUYO", "ENZO", "NATALIA"):
+                self.avisar_en_el_momento(c, {"categoria": categoria})
+            else:
+                # RUIDO, DUDA o ERROR: lo que hay que volver a mandar es
+                # el "no pude decidir" con el teclado de categorías, que
+                # es el aviso que no salió.
+                self.avisar_para_que_decida(c)
+
     def _atender_revers_pendientes(self):
         """Retoma los Rever cuyo motivo ya contestó JP pero que todavía
         no se ejecutaron de verdad -tarea 11, ronda 1, hallazgo CRÍTICO.
@@ -459,7 +635,10 @@ class Secretaria:
                 # ahora dio distinto-: no es una falla real, se
                 # reintenta la próxima vuelta sin gastar un intento.
                 continue
-            except Exception as e:
+            except (Exception, SystemExit) as e:
+                # SystemExit incluido: rever_ruido() termina en
+                # clasificador.clasificar(), que puede levantarlo si no
+                # hay motor configurado, y no hereda de Exception.
                 _registrar("rever", e)
                 memoria.anotar_falla(self.cx, fila["message_id"],
                                      f"{type(e).__name__}: {e}")
@@ -513,6 +692,12 @@ class Secretaria:
         from datetime import date, timedelta
         self._atender_pendientes()
         self._atender_revers_pendientes()
+        # Antes que nada nuevo: lo que ya se sabe que hay que avisarle a
+        # JP y todavía no salió. Va primero por el mismo motivo que los
+        # pendientes de archivar -lo viejo no puede quedar atrás de lo
+        # nuevo- y porque si Telegram sigue caído, el resto de la vuelta
+        # tampoco va a poder avisar nada.
+        self._atender_avisos_pendientes()
         entrantes = correo.traer_nuevos(date.today() - timedelta(days=1))
         sistema = clasificador.prompt_sistema()
         direcciones, dominios = reglas.remitentes_ruido()
@@ -572,9 +757,17 @@ class Secretaria:
 
             try:
                 pred = clasificador.clasificar(sistema, c)
-            except Exception as e:
+            except (Exception, SystemExit) as e:
                 # Ningún motor respondió. Se le muestra a JP igual: el
                 # silencio no es una categoría.
+                #
+                # SystemExit entra acá a propósito: es lo que levanta
+                # clasificador.motores() cuando el .env no tiene ningún
+                # motor, y no hereda de Exception. Escapándose de acá
+                # mataba el hilo del correo y dejaba a launchd
+                # reiniciando en bucle, sin un solo aviso -o sea, "no
+                # hay motor configurado" se comportaba peor que
+                # cualquier falla de red.
                 memoria.anotar(self.cx, c, "ERROR", f"{type(e).__name__}")
                 self.avisar_para_que_decida(c)
                 continue
@@ -607,12 +800,28 @@ class Secretaria:
         hace segundos, justo los que más le importan a JP (lo suyo y lo
         para derivar)-, y se agrega el tercer botón que el diseño (§7.2)
         siempre tuvo y el código no: "⭐ Cliente importante".
+
+        Despacho final, CRÍTICO 2: el retorno de enviar() se MIRA antes
+        de dar el aviso por entregado. enviar() devuelve None cuando
+        Telegram no contestó y no levanta nada, y memoria.cambiar(...,
+        "avisado") corría igual: como nadie lee "avisado", el correo de
+        JP desaparecía del sistema entero -no volvía a interrumpir, no
+        entraba en ningún resumen, y el de las 8:30 decía "No entró nada
+        nuevo"-. Es exactamente la invariante que _avisar_la_falla ya
+        respetaba 240 líneas más abajo, que no se había aplicado al
+        aviso que más importa: ningún estado terminal sin entrega
+        confirmada. Si no salió queda en cola
+        (_atender_avisos_pendientes), que es lo que el diseño §8 pide.
+
+        Devuelve si el aviso salió de verdad.
         """
-        import secrets
         importante = reglas.protegido(c) and pred["categoria"] == "TUYO"
         if not en_horario(datetime.now()) and not importante:
-            return
-        tanda = secrets.token_hex(2)
+            # Ni se intentó: el correo queda como está -"clasificado"
+            # si es nuevo- y entra en el resumen de las 8:30, que es lo
+            # que corresponde fuera de horario.
+            return False
+        tanda = self._nueva_tanda()
         titulo = ("📌 Es tuyo" if pred["categoria"] == "TUYO"
                   else f"➡️ Para derivar a {pred['categoria'].title()}")
         texto = (f"<b>{titulo}</b> · <i>{html.escape(correo.fecha_legible(c['fecha']))}</i>\n"
@@ -621,13 +830,19 @@ class Secretaria:
                  f"<b>Asunto:</b> {html.escape(c['asunto'][:120])}\n"
                  f"{html.escape(correo.adjuntos_legibles(c.get('adjuntos')))}\n\n"
                  f"<pre>{html.escape((c['cuerpo'] or '')[:600])}</pre>")
-        self.enviar(texto, {"inline_keyboard": [
-            [{"text": "Listo, lo vi", "callback_data": f"v|{tanda}-1|ok"},
-             {"text": "No era mío", "callback_data": f"n|{tanda}-1|0"}],
-            [{"text": "⭐ Cliente importante",
-              "callback_data": f"i|{tanda}-1|0"}]]})
+        if not self.enviar(texto, {"inline_keyboard": [
+                [{"text": "Listo, lo vi", "callback_data": f"v|{tanda}-1|ok"},
+                 {"text": "No era mío", "callback_data": f"n|{tanda}-1|0"}],
+                [{"text": "⭐ Cliente importante",
+                  "callback_data": f"i|{tanda}-1|0"}]]}):
+            # No salió: a la cola. Y la tanda no se registra -sus
+            # botones no existen en ningún lado, registrarla sería un
+            # token fantasma más.
+            memoria.cambiar(self.cx, c["message_id"], "pendiente_de_avisar")
+            return False
         memoria.cambiar(self.cx, c["message_id"], "avisado")
         self.abiertos[tanda] = [c["message_id"]]
+        return True
 
     def avisar_para_que_decida(self, c):
         """Ningún motor respondió, o respondió pero no logró decidir
@@ -638,16 +853,28 @@ class Secretaria:
         registra la tanda para que sus botones -las seis categorías y
         "⭐ Cliente importante", ambos ya en bot.teclado()- funcionen de
         verdad en vez de contestar "ya pasó".
+
+        Despacho final: mismo arreglo del CRÍTICO 2 que
+        avisar_en_el_momento, por la misma razón y peor todavía acá.
+        Este correo queda en "mostrado_sin_clasificar", y a ESA situación
+        no la mira ningún resumen: si el mensaje no salía, el correo que
+        el sistema no supo clasificar -justo el que necesita que decida
+        JP- no volvía a aparecer nunca. Ahora, si no salió, queda en
+        cola.
+
+        Devuelve si el aviso salió de verdad.
         """
-        import secrets
-        tanda = secrets.token_hex(2)
+        tanda = self._nueva_tanda()
         texto = (f"<b>⚠️ No pude decidir</b>\n"
                  f"<b>De:</b> {html.escape(c['de'][:90])}\n"
                  f"<b>Asunto:</b> {html.escape(c['asunto'][:120])}\n\n"
                  f"<pre>{html.escape((c['cuerpo'] or '')[:600])}</pre>\n\n"
                  f"¿Qué correspondía?")
-        self.enviar(texto, bot.teclado(1, tanda))
+        if not self.enviar(texto, bot.teclado(1, tanda)):
+            memoria.cambiar(self.cx, c["message_id"], "pendiente_de_avisar")
+            return False
         self.abiertos[tanda] = [c["message_id"]]
+        return True
 
     def avisar_que_no_se_pudo_archivar(self, c, falla, duplicado=False):
         """Le avisa a JP que un correo se quedó sin intentos.
@@ -670,10 +897,29 @@ class Secretaria:
         en la bandeja Y en Ruido. Decirle "quedó en tu bandeja, sin
         archivar" -como decía siempre- lo manda a archivarlo de nuevo y a
         quedarse con dos copias.
+
+        CorreoPerdido es el tercer caso y hasta el despacho final decía
+        justo lo contrario de la verdad: llega por la misma vía que el
+        duplicado (borrar_el_original lo levanta y _anotar_falla lo manda
+        a "pendiente_de_borrar"), así que el aviso decía "Quedó
+        duplicado: sigue en tu bandeja y ya hay una copia en
+        INBOX.Ruido" a renglón seguido de un "Falló: CorreoPerdido: no
+        está en INBOX y tampoco en INBOX.Ruido". Mandaba a JP a buscar el
+        correo en los dos lugares donde el sistema acababa de confirmar
+        que no estaba. Se reconoce por el texto de la falla y no por el
+        tipo de la excepción a propósito: el aviso puede salir después de
+        un reinicio, leyendo `falla` de la base, donde lo único que
+        sobrevive es el texto.
         """
-        donde = ("Quedó duplicado: sigue en tu bandeja y ya hay una copia"
-                 " en INBOX.Ruido." if duplicado else
-                 "Quedó en tu bandeja, sin archivar.")
+        if str(falla).startswith("CorreoPerdido"):
+            donde = ("No lo encuentro ni en tu bandeja ni en INBOX.Ruido. "
+                     "Puede que esté en otra carpeta o que se haya movido "
+                     "a mano: hace falta que lo busques vos.")
+        elif duplicado:
+            donde = ("Quedó duplicado: sigue en tu bandeja y ya hay una "
+                     "copia en INBOX.Ruido.")
+        else:
+            donde = "Quedó en tu bandeja, sin archivar."
         texto = (f"<b>🚨 No pude archivar un correo</b>\n"
                  f"<b>De:</b> {html.escape(str(c.get('de', ''))[:90])}\n"
                  f"<b>Asunto:</b> {html.escape(str(c.get('asunto', ''))[:120])}\n"
@@ -737,7 +983,7 @@ class Secretaria:
             lineas += [self._linea_accionable(c) for c in derivar]
         return lineas
 
-    def armar_resumen(self, correos, momento):
+    def armar_resumen(self, correos, momento, encabezado=""):
         """El texto y los botones de un resumen.
 
         Lo de JP y lo derivable van arriba y sin botón de cierre: quedan
@@ -765,9 +1011,15 @@ class Secretaria:
         cada llamada acá arma una tanda nueva en self.abiertos, y una
         tanda armada y descartada es un botón fantasma que no
         corresponde a ningún mensaje real (ronda 2, hallazgo menor).
+
+        `encabezado` es la línea de "estuve caída desde ..." cuando
+        corresponde (ver _encabezado_de_caida). Entra por parámetro y no
+        se pega afuera para que cuente en el presupuesto del colapso del
+        equipo: pegada afuera podría empujar el mensaje por encima del
+        límite de Telegram, que lo rechaza entero.
         """
-        import secrets
-        tanda = secrets.token_hex(2)
+        tanda = self._nueva_tanda()
+        prefijo = [encabezado] if encabezado else []
         mios = [c for c in correos if _categoria_de_resumen(c) == "TUYO"]
         derivar = [c for c in correos
                   if _categoria_de_resumen(c) in ("ENZO", "NATALIA")]
@@ -779,10 +1031,12 @@ class Secretaria:
             # ella: si la secretaria se rompe y deja de avisar, el
             # silencio se parece demasiado a un día tranquilo. Por eso
             # el resumen sale siempre, aunque no haya nada que contar.
-            return (f"{self.SALUDO[momento]} No entró nada nuevo.",
+            return ("\n".join(prefijo +
+                              [f"{self.SALUDO[momento]} No entró nada nuevo."]),
                     {"inline_keyboard": []})
 
-        cabecera = ([f"{self.SALUDO[momento]} Entraron {len(correos)} correos."]
+        cabecera = (prefijo
+                   + [f"{self.SALUDO[momento]} Entraron {len(correos)} correos."]
                    + self._lineas_mios_derivar(mios, derivar))
         pie = [f"\n🗑 Archivado como ruido: {len(ruido)}"] if ruido else []
 
@@ -827,7 +1081,7 @@ class Secretaria:
         self.abiertos[tanda] = [c["message_id"] for c in equipo]
         return texto, {"inline_keyboard": filas}
 
-    def _cabria_en_un_mensaje(self, correos, momento):
+    def _cabria_en_un_mensaje(self, correos, momento, encabezado=""):
         """¿Entra lo accionable solo -lo que armar_resumen nunca
         recorta- en un mensaje, sumado al margen fijo que se reserva
         para el colapso del equipo?
@@ -849,6 +1103,8 @@ class Secretaria:
         saludo = f"{self.SALUDO[momento]} Entraron {len(correos)} correos."
         largo = len(saludo) + sum(
             len(l) + 1 for l in self._lineas_mios_derivar(mios, derivar))
+        if encabezado:
+            largo += len(encabezado) + 1
         return largo + MARGEN_COLAPSO_EQUIPO <= LIMITE_TELEGRAM
 
     def _empacar_accionable(self, accionable, cupo):
@@ -894,7 +1150,8 @@ class Secretaria:
         lineas.append("\nPara verlos ahora, entrá directo a la casilla.")
         return "\n".join(lineas)
 
-    def _mandar_resumen_grande(self, momento, mios, derivar, equipo, ruido):
+    def _mandar_resumen_grande(self, momento, mios, derivar, equipo, ruido,
+                               consumibles=None, encabezado=""):
         """El camino de mucho volumen: ni lo accionable solo entra en un
         mensaje. Se manda en varios, respetando la jerarquía -lo
         accionable primero y completo, el equipo y el ruido nunca se
@@ -906,7 +1163,14 @@ class Secretaria:
         Ningún mensaje de acá lleva botones -no enumeran equipo, así que
         no hay nada que "Leí todo" pueda cerrar- y por lo tanto no arma
         tandas en self.abiertos: nada fantasma que limpiar.
+
+        `consumibles` son los message_id que ESTE resumen puede dar por
+        contados. No es lo mismo que "los que se mostraron": lo
+        archivado se muestra (se cuenta en el cierre) pero es del
+        resumen de las 18:00, el único que lo lista numerado y con botón
+        de Rever. Ver mandar_resumen.
         """
+        consumibles = set(consumibles or ())
         accionable = mios + derivar
         cupo_detalle = TOPE_MENSAJES - 1  # uno se reserva para el cierre
         lotes, sobran = self._empacar_accionable(accionable, cupo_detalle)
@@ -925,9 +1189,10 @@ class Secretaria:
             mios_l = [c for c in lote if _categoria_de_resumen(c) == "TUYO"]
             derivar_l = [c for c in lote
                         if _categoria_de_resumen(c) in ("ENZO", "NATALIA")]
-            cabecera = [f"{self.SALUDO[momento]} Volviste con "
-                       f"{len(accionable)} correos tuyos o para derivar "
-                       f"esperando (parte {n}/{len(lotes) + 1})."]
+            cabecera = ([encabezado] if encabezado and n == 1 else []) + [
+                f"{self.SALUDO[momento]} Volviste con "
+                f"{len(accionable)} correos tuyos o para derivar "
+                f"esperando (parte {n}/{len(lotes) + 1})."]
             texto = "\n".join(cabecera + self._lineas_mios_derivar(mios_l, derivar_l))
             if not self.enviar(texto):
                 # Este lote no salió: ni éste ni el cierre se mandan, y
@@ -935,8 +1200,10 @@ class Secretaria:
                 # vez, en vez de dar por visto algo que Telegram nunca
                 # entregó.
                 return
-            memoria.cambiar_lote(self.cx, [c["message_id"] for c in lote],
-                                 "en_resumen")
+            self.caida_desde = self.caida_hasta = None
+            memoria.cambiar_lote(
+                self.cx, [c["message_id"] for c in lote
+                          if c["message_id"] in consumibles], "en_resumen")
 
         texto_cierre = self._texto_cierre_grande(sobran, equipo, ruido)
         if self.enviar(texto_cierre):
@@ -944,11 +1211,14 @@ class Secretaria:
             # normal (ronda 1): el conteo del cierre es exacto aunque no
             # se hayan listado, y no necesitan revisión uno por uno. Lo
             # accionable sobrante NO se marca -queda "clasificado" para
-            # volver completo la próxima vez.
-            memoria.cambiar_lote(self.cx, [c["message_id"] for c in equipo + ruido],
-                                 "en_resumen")
+            # volver completo la próxima vez. Lo archivado tampoco: no
+            # está en `consumibles`, es del resumen de las 18:00.
+            self.caida_desde = self.caida_hasta = None
+            memoria.cambiar_lote(
+                self.cx, [c["message_id"] for c in equipo + ruido
+                          if c["message_id"] in consumibles], "en_resumen")
 
-    def armar_resumen_de_ruido(self, correos):
+    def armar_resumen_de_ruido(self, correos, encabezado=""):
         """El texto y los botones del resumen de ruido de las 18:00.
 
         Es la red que atrapa el error más caro del sistema: algo de JP
@@ -966,13 +1236,14 @@ class Secretaria:
         ni para rever, y una tanda sin un resumen real detrás es un
         botón fantasma (mismo hallazgo que armar_resumen, ronda 2).
         """
+        prefijo = [encabezado] if encabezado else []
         if not correos:
-            return (f"{self.SALUDO['ruido']} No archivé nada como ruido.",
+            return ("\n".join(prefijo + [f"{self.SALUDO['ruido']} No archivé"
+                                         f" nada como ruido."]),
                     {"inline_keyboard": []})
 
-        import secrets
-        tanda = secrets.token_hex(2)
-        cabecera = [f"{self.SALUDO['ruido']} Son {len(correos)}."]
+        tanda = self._nueva_tanda()
+        cabecera = prefijo + [f"{self.SALUDO['ruido']} Son {len(correos)}."]
         lineas = [f"  {n}. {html.escape(c['de'][:34])} — "
                  f"{html.escape(c['asunto'][:44])}"
                  for n, c in enumerate(correos, 1)]
@@ -1015,10 +1286,25 @@ class Secretaria:
         siempre, sólo con otro saludo; separado en su propio método por
         la misma razón que _mandar_resumen_grande: mandar_resumen()
         decide QUÉ camino corresponde, no arma el contenido.
+
+        Este método es el DUEÑO de la situación "archivado": es el único
+        que la consume. Los resúmenes de las 8:30 y las 17:00 la miran
+        para contarla en el pie ("Archivado como ruido: N") pero no la
+        tocan. Antes sí la tocaban -marcaban "en_resumen" todo lo que
+        juntaban, clasificado y archivado por igual- y por eso a las
+        18:00 acá no quedaba nada: medido, un día con 3 ruidos archivados
+        daba "No archivé nada como ruido" y el teclado vacío. Con eso,
+        todo lo archivado entre las 18:00 de ayer y las 17:00 de hoy
+        nunca aparecía en una lista numerada y nunca se podía Rever: la
+        red que atrapa el error más caro del sistema -algo de JP que se
+        fue al tacho- no existía.
         """
         correos = memoria.del_dia(self.cx, "archivado", "")
-        texto, teclado = self.armar_resumen_de_ruido(correos)
+        texto, teclado = self.armar_resumen_de_ruido(
+            correos, self._encabezado_de_caida())
         resultado = self.enviar(texto, teclado)
+        if resultado:
+            self.caida_desde = self.caida_hasta = None
         if resultado and correos:
             # Mismo cuidado que en el camino general: si Telegram no
             # confirma el envío, no se marca nada -se reintenta entero
@@ -1032,10 +1318,11 @@ class Secretaria:
 
         Entran los correos que siguen en "clasificado" (lo de JP y lo
         para derivar que no interrumpió porque llegó fuera de horario, y
-        todo lo del equipo, que nunca interrumpe) y en "archivado" (el
-        ruido que ya se movió a INBOX.Ruido). Lo que ya se avisó al
-        toque (avisar_en_el_momento) no vuelve a aparecer acá: ya lo
-        vio.
+        todo lo del equipo, que nunca interrumpe), los que quedaron en
+        "pendiente_de_avisar" (el aviso al toque no salió) y, sólo para
+        contarlos, los "archivado" (el ruido que ya se movió a
+        INBOX.Ruido). Lo que ya se avisó al toque
+        (avisar_en_el_momento) no vuelve a aparecer acá: ya lo vio.
 
         El momento "ruido" es distinto de los otros dos y se resuelve
         aparte (_mandar_resumen_de_ruido): es la lista numerada de lo
@@ -1065,19 +1352,47 @@ class Secretaria:
         if momento == "ruido":
             return self._mandar_resumen_de_ruido()
 
-        correos = (memoria.del_dia(self.cx, "clasificado", "") +
-                   memoria.del_dia(self.cx, "archivado", ""))
+        # Lo que este resumen MUESTRA y lo que este resumen CONSUME no
+        # son lo mismo, y confundirlos era el CRÍTICO 1.
+        #
+        # Se consume lo "clasificado" -lo de JP y lo para derivar que no
+        # interrumpió, y todo lo del equipo- y lo que quedó en cola de
+        # aviso: si el aviso al toque no salió, el resumen es el otro
+        # camino por el que ese correo llega igual (ver
+        # _atender_avisos_pendientes).
+        #
+        # Lo "archivado" se muestra -el conteo del pie- pero NO se
+        # consume: su dueño es _mandar_resumen_de_ruido, el único que lo
+        # convierte en la lista numerada con botón de Rever. Marcarlo
+        # "en_resumen" acá dejaba vacío el mensaje de las 18:00 casi
+        # todos los días, y con él la única forma que tiene JP de sacar
+        # de Ruido algo suyo. Un correo archivado deja de ser reversible
+        # sólo cuando JP lo confirma, nunca por un efecto secundario de
+        # otro resumen.
+        clasificados = sorted(
+            memoria.del_dia(self.cx, "clasificado", "") +
+            memoria.del_dia(self.cx, "pendiente_de_avisar", ""),
+            key=lambda c: c.get("visto") or "")
+        archivados = memoria.del_dia(self.cx, "archivado", "")
+        correos = clasificados + archivados
+        consumibles = {c["message_id"] for c in clasificados}
+        encabezado = self._encabezado_de_caida()
 
-        if not correos or self._cabria_en_un_mensaje(correos, momento):
-            texto, teclado = self.armar_resumen(correos, momento)
+        if not correos or self._cabria_en_un_mensaje(correos, momento,
+                                                     encabezado):
+            texto, teclado = self.armar_resumen(correos, momento, encabezado)
             resultado = self.enviar(texto, teclado)
-            if resultado and correos:
+            if resultado:
+                # Salió: el aviso de la caída ya se dio, no se repite en
+                # el próximo resumen.
+                self.caida_desde = self.caida_hasta = None
+            if resultado and consumibles:
                 # Una sola transacción para todo el lote: con un commit
                 # por correo, morir a mitad de camino deja marcados sólo
                 # algunos aunque el mensaje entero ya salió y JP ya lo
                 # vio entero -la próxima vuelta repetiría el resto como
                 # si fuera nuevo. Atómico, se marcan todos o ninguno.
-                memoria.cambiar_lote(self.cx, [c["message_id"] for c in correos],
+                memoria.cambiar_lote(self.cx, sorted(consumibles),
                                      "en_resumen")
             return
 
@@ -1086,7 +1401,8 @@ class Secretaria:
                   if _categoria_de_resumen(c) in ("ENZO", "NATALIA")]
         equipo = [c for c in correos if _categoria_de_resumen(c) == "DELEGADO"]
         ruido = [c for c in correos if _categoria_de_resumen(c) == "RUIDO"]
-        self._mandar_resumen_grande(momento, mios, derivar, equipo, ruido)
+        self._mandar_resumen_grande(momento, mios, derivar, equipo, ruido,
+                                    consumibles, encabezado)
 
     # Categorías con las que corresponde hacer algo -TUYO/ENZO/NATALIA
     # interrumpen o esperan al resumen, DELEGADO lo maneja el equipo-,
@@ -1168,7 +1484,11 @@ class Secretaria:
             pred = clasificador.clasificar(clasificador.prompt_sistema(),
                                            contexto)
             nueva = pred["categoria"]
-        except Exception:
+        except (Exception, SystemExit):
+            # SystemExit incluido -no hereda de Exception y es lo que
+            # levanta motores() sin motor configurado-: acá también el
+            # silencio no es una categoría, queda "ERROR" y se le
+            # muestra a JP.
             nueva = "ERROR"
 
         memoria.corregir(self.cx, message_id, nueva, explicacion)

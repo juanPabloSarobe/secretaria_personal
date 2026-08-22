@@ -262,18 +262,32 @@ class NoMandaUnaAndanadaSiSePerdieronVarios(unittest.TestCase):
     cronología resumen por resumen: uno solo, que junte todo lo
     pendiente, alcanza -y como mandar_resumen ya arma su contenido a
     partir de lo que sigue en la base sin resumir, ese único envío
-    igual cuenta todo, no sólo lo del último momento."""
+    igual cuenta todo, no sólo lo del último momento.
 
-    def test_varios_momentos_pendientes_mandan_un_solo_resumen(self):
+    Despacho final: "uno solo" vale para los resúmenes GENERALES, que
+    son intercambiables entre sí porque todos arman su contenido de la
+    misma consulta. El de ruido no entra en esa cuenta: es la única
+    lista numerada, la única con botón de Rever, y ningún resumen
+    general lo reemplaza -el general cuenta el ruido, no lo lista-.
+    Colapsarlo contra el general, como se hacía, borraba esa red entera
+    cada vez que el proceso estuvo caído cruzando las 18:00. Dos
+    mensajes en el peor caso, no los nueve que esta clase evita."""
+
+    def test_varios_momentos_pendientes_no_mandan_una_andanada(self):
         s = secretaria.Secretaria(cx=_CxMuda())
         disparados = []
         s.mandar_resumen = disparados.append
         s.reloj.momentos_pendientes = lambda ahora, ultimo: [
+            "manana", "tarde", "ruido",
+            "manana", "tarde", "ruido",
             "manana", "tarde", "ruido"]
 
         s._disparar_resumenes(datetime(2026, 8, 24, 9, 0))
 
-        self.assertEqual(len(disparados), 1)
+        # Nueve momentos perdidos: como mucho dos mensajes -uno general
+        # y el de ruido-. No nueve.
+        self.assertLessEqual(len(disparados), 2)
+        self.assertEqual(disparados, ["tarde", "ruido"])
 
     def test_el_saludo_evita_ruido_si_hay_otro_pendiente(self):
         """Hallazgo de la ronda 1: el saludo se elegía con
@@ -281,7 +295,15 @@ class NoMandaUnaAndanadaSiSePerdieronVarios(unittest.TestCase):
         el de las 18 -"ruido"-, JP recibía "Lo que archivé hoy" sobre un
         resumen que en realidad traía de vuelta correos suyos
         acumulados de varios días. Se prefiere el último pendiente que
-        no sea "ruido"."""
+        no sea "ruido" para el resumen general.
+
+        Despacho final, CRÍTICO 1 (segundo camino): antes eso se
+        implementaba DESCARTANDO el momento de ruido, no sólo evitando
+        su saludo. Con el proceso caído de 16:00 a 18:30 salía "tarde" y
+        el de ruido se perdía -y con él la única lista numerada de lo
+        archivado ese día, que es la única forma que tiene JP de sacar
+        de Ruido algo suyo-. Ahora el general elige su saludo sin
+        "ruido" Y el de ruido sale igual, después."""
         s = secretaria.Secretaria(cx=_CxMuda())
         disparados = []
         s.mandar_resumen = disparados.append
@@ -290,7 +312,21 @@ class NoMandaUnaAndanadaSiSePerdieronVarios(unittest.TestCase):
 
         s._disparar_resumenes(datetime(2026, 8, 24, 9, 0))
 
-        self.assertEqual(disparados, ["tarde"])
+        self.assertEqual(disparados, ["tarde", "ruido"])
+
+    def test_una_caida_que_cruza_las_18_no_se_lleva_puesto_el_de_ruido(self):
+        """El caso medido: el proceso cae a las 16:00 y vuelve a las
+        18:30, con el reloj de verdad -no con momentos_pendientes
+        mockeado-. Se perdieron el corte de las 17:00 y el de las 18:00,
+        y tienen que salir los dos."""
+        s = secretaria.Secretaria(cx=_CxMuda())
+        disparados = []
+        s.mandar_resumen = disparados.append
+        s.ultimo_reloj = datetime(2026, 8, 17, 16, 0)
+
+        s._disparar_resumenes(datetime(2026, 8, 17, 18, 30))
+
+        self.assertEqual(disparados, ["tarde", "ruido"])
 
     def test_el_saludo_de_ruido_se_usa_si_es_lo_unico_pendiente(self):
         s = secretaria.Secretaria(cx=_CxMuda())

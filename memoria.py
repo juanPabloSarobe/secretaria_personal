@@ -39,11 +39,21 @@ import threading
 # "no_se_pudo_archivar", por la misma razón: avisar antes de dar por
 # terminal evita que un Telegram caído en ese instante se lleve el aviso
 # puesto para siempre.
+#
+# "pendiente_de_avisar" -despacho final- es la cola de avisos que el
+# diseño (§8) pide y no existía: "los avisos quedan en cola y salen
+# cuando vuelve". Un aviso al toque que Telegram no entregó dejaba el
+# correo en "avisado" igual, y "avisado" no lo lee nadie: el correo de
+# JP desaparecía del sistema entero -no volvía a interrumpir, no entraba
+# en ningún resumen, y el de las 8:30 decía "No entró nada nuevo"-. Es
+# la misma invariante que "no_se_pudo_archivar" ya respetaba, aplicada
+# al aviso que más importa: ningún estado terminal sin entrega
+# confirmada.
 SITUACIONES = {"clasificado", "archivado", "en_resumen", "avisado",
                "cerrado", "corregido", "mostrado_sin_clasificar",
                "pendiente_de_archivar", "pendiente_de_borrar",
                "no_se_pudo_archivar", "pendiente_de_rever",
-               "no_se_pudo_rever"}
+               "no_se_pudo_rever", "pendiente_de_avisar"}
 
 # RLock y no Lock: alguna función de acá podría terminar llamando a otra
 # de acá (p.ej. anotar() llamaba a situacion()), y con un Lock simple eso
