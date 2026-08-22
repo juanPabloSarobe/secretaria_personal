@@ -754,5 +754,64 @@ class ElUidvalidityNoSeLeeDosVeces(unittest.TestCase):
 
 
 
+class NuncaSePierdeUnCorreo(unittest.TestCase):
+    """La propiedad que está por encima de todas las demás: pase lo que
+    pase, el correo tiene que seguir existiendo en alguna carpeta.
+
+    Duplicado es feo pero recuperable; perdido no se deshace. Se prueba a
+    la fuerza bruta: cada comando fallando de cada forma posible -NO, red
+    caída antes, y red caída DESPUÉS de que el servidor ya hizo el
+    trabajo- en cada posición, con reintento incluido. El buzón lleva la
+    cuenta y revienta con PerdidaDeCorreo si en algún momento el mensaje
+    no está en ninguna de las dos carpetas."""
+
+    def test_ninguna_combinacion_de_fallas_deja_el_correo_en_la_nada(self):
+        combinaciones = 0
+        for comando in ("SEARCH", "FETCH", "COPY", "STORE", "EXPUNGE"):
+            for falla in ("NO", "RED", "RED_DESPUES"):
+                for con_mid in (True, False):
+                    for vueltas in (1, 2, 3):
+                        combinaciones += 1
+                        buzon = BuzonFalso()
+                        buzon.vigilar = True
+                        m = buzon.agregar(
+                            "INBOX", fecha=hace(0),
+                            message_id="<falla@x>" if con_mid else "")
+                        c = correo_de(m)
+                        buzon.plan[comando] = [falla]
+                        with mock.patch.object(correo, "abrir_buzon",
+                                               return_value=buzon):
+                            for _ in range(vueltas):
+                                try:
+                                    correo.mover_a(c, "INBOX.Ruido")
+                                except Exception:
+                                    pass    # el ciclo las atrapa y reintenta
+                        self.assertGreaterEqual(
+                            buzon.cuenta("INBOX") + buzon.cuenta("INBOX.Ruido"),
+                            1, f"se perdió con {comando}={falla}")
+        self.assertEqual(combinaciones, 90)
+
+    def test_y_tampoco_termina_con_dos_copias_en_ruido(self):
+        """El otro lado de la misma moneda: con el reintento, ninguna
+        falla puede dejar dos copias en el destino."""
+        for comando in ("SEARCH", "FETCH", "COPY", "STORE", "EXPUNGE"):
+            for falla in ("NO", "RED", "RED_DESPUES"):
+                buzon = BuzonFalso()
+                m = buzon.agregar("INBOX", fecha=hace(0), message_id="")
+                c = correo_de(m)
+                buzon.plan[comando] = [falla]
+                with mock.patch.object(correo, "abrir_buzon",
+                                       return_value=buzon):
+                    for _ in range(4):
+                        try:
+                            correo.mover_a(c, "INBOX.Ruido")
+                        except Exception:
+                            pass
+                self.assertLessEqual(
+                    buzon.cuenta("INBOX.Ruido"), 1,
+                    f"quedaron duplicados con {comando}={falla}")
+
+
+
 if __name__ == "__main__":
     unittest.main()
