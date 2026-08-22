@@ -513,7 +513,12 @@ class RespuestaTardia(unittest.TestCase):
         _, teclado = self.s.armar_resumen_de_ruido(
             memoria.del_dia(self.s.cx, "archivado", ""))
         rever_cb = teclado["inline_keyboard"][0][1]["callback_data"]
-        with mock.patch.object(secretaria.bot, "tg_suave"):
+        # tg_suave sólo tapa el acuse del botón; la pregunta "¿cuál de
+        # los N no era ruido?" sale por Secretaria.enviar, y sin este
+        # parche llegaba al Telegram DE VERDAD de JP (ver
+        # tests/sin_red.py).
+        with mock.patch.object(secretaria.bot, "tg_suave"), \
+             mock.patch.object(self.s, "enviar", return_value={"ok": True}):
             self.s.atender(boton(rever_cb))
 
         # Pasa el tiempo -horas, en la realidad- y sale un resumen nuevo,
@@ -531,7 +536,14 @@ class RespuestaTardia(unittest.TestCase):
 
         # Recién ahora -en el otro hilo, en la próxima vuelta del ciclo
         # de correo- se ejecuta de verdad.
+        #
+        # `enviar` va parcheado: rever_ruido() le contesta a JP cómo
+        # quedó, y sin esto ese mensaje salía al Telegram DE VERDAD -era
+        # uno de los dos tests que llegaban a la red, ver
+        # tests/sin_red.py-. El parche de bot.tg de más arriba no lo
+        # tapaba: este bloque es otro.
         with mock.patch.object(secretaria, "EN_SECO", False), \
+             mock.patch.object(self.s, "enviar", return_value={"ok": True}), \
              mock.patch.object(secretaria.correo, "devolver_a_bandeja",
                                return_value=True) as devolver, \
              mock.patch.object(

@@ -70,6 +70,31 @@ MUTACIONES = [
     ("secretaria.py", "el aviso de CorreoPerdido vuelve a decir que está duplicado",
      '        if str(falla).startswith("CorreoPerdido"):',
      "        if False:"),
+
+    # --- lo que quedó después del despacho de arreglo ----------------
+
+    ("secretaria.py", "el DUDA avisado se queda en la cola para siempre",
+     '        memoria.cambiar(self.cx, c["message_id"], "mostrado_sin_clasificar")\n'
+     '        self.abiertos[tanda] = [c["message_id"]]\n'
+     '        return True',
+     '        self.abiertos[tanda] = [c["message_id"]]\n'
+     '        return True'),
+
+    ("secretaria.py", "el hueco de caída se mide después del trabajo, no antes",
+     "        if (arranque - self.ultimo_reloj).total_seconds() > HUECO_CAIDA:\n"
+     "            self.caida_desde, self.caida_hasta = self.ultimo_reloj, arranque",
+     "        if (ahora - self.ultimo_reloj).total_seconds() > HUECO_CAIDA:\n"
+     "            self.caida_desde, self.caida_hasta = self.ultimo_reloj, ahora"),
+
+    ("secretaria.py", "el resumen de mucho volumen consume lo archivado",
+     '                self.cx, [c["message_id"] for c in equipo + ruido\n'
+     '                          if c["message_id"] in consumibles], "en_resumen")',
+     '                self.cx, [c["message_id"] for c in equipo + ruido],\n'
+     '                "en_resumen")'),
+
+    ("tests/sin_red.py", "la reja de red se puede desactivar sin que nadie se entere",
+     "    if socket.create_connection is not _mi_create_connection:",
+     "    if False:"),
 ]
 
 

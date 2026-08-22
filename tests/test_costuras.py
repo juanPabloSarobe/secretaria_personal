@@ -25,7 +25,9 @@ que sobrevivían la suite entera: el token de tanda, y `readonly` en
 abrir_buzon (esa va en test_correo.py, al lado de la de BODY.PEEK).
 """
 import contextlib
+import os
 import secrets
+import socket
 import tempfile
 import threading
 import time
@@ -38,6 +40,7 @@ import clasificador
 import correo
 import memoria
 import secretaria
+from tests import sin_red
 from tests.buzon_falso import BuzonFalso, correo_de
 
 
@@ -128,29 +131,57 @@ class _Escenario(unittest.TestCase):
                 pila.enter_context(p)
             yield pila
 
-    def _vuelta(self, ahora, entrantes=(), en_horario=False):
+    def _vuelta(self, ahora, entrantes=(), en_horario=False, trabajo=0):
         """Una vuelta del ciclo de correo, con el mismo cuerpo que
         ciclo_de_correo: revisar, disparar resúmenes, latir. Que el
         latido entre acá no es decorativo -es lo que el reinicio lee
-        después para saber desde cuándo estuvo caída."""
+        después para saber desde cuándo estuvo caída.
+
+        `ahora` es cuándo TERMINA la vuelta y `trabajo` cuánto tardó
+        revisar_casilla(), así que la vuelta empezó `trabajo` segundos
+        antes. Modelarlo importa: ciclo_de_correo llama a
+        _disparar_resumenes DESPUÉS de revisar la casilla, así que la
+        distancia entre dos llamadas seguidas es wait(CADA) MÁS lo que
+        tardó el trabajo. Un helper que avance en pasos exactos de CADA
+        no modela nunca el tiempo de trabajo y hace pasar por
+        construcción cualquier test sobre el hueco -que es lo que pasaba
+        con test_un_dia_normal_no_dice_que_estuvo_caida-.
+
+        Y no es un caso de laboratorio: ESPERA_RESPUESTA son 180s por
+        pedido, dos pasadas por correo, más el backoff de los 429.
+        """
+        arranque = ahora - timedelta(seconds=trabajo)
         with self._contexto(entrantes, en_horario):
             self.s.revisar_casilla()
-            self.s._disparar_resumenes(ahora)
+            self.s._disparar_resumenes(ahora, arranque)
         memoria.latido(self.s.cx, ahora.isoformat(timespec="seconds"))
+        return ahora
 
-    def _hasta(self, desde, hasta):
-        """Avanza el reloj de `desde` a `hasta` en pasos de CADA
-        segundos, que es como avanza el ciclo de verdad.
+    def _una_vuelta_mas(self, fin_anterior, entrantes=(), en_horario=False,
+                        trabajo=0):
+        """La vuelta siguiente a una que terminó en `fin_anterior`: espera
+        CADA y después tarda `trabajo` en revisar la casilla. Devuelve
+        cuándo terminó, para encadenar."""
+        return self._vuelta(
+            fin_anterior + timedelta(seconds=secretaria.CADA + trabajo),
+            entrantes, en_horario, trabajo)
+
+    def _hasta(self, desde, hasta, trabajo=0):
+        """Avanza el reloj de `desde` a `hasta` vuelta a vuelta, que es
+        como avanza el ciclo de verdad.
 
         A propósito no se salta de un momento al siguiente: un salto de
         horas es indistinguible de una caída, y con razón -es justo lo
         que detecta HUECO_CAIDA-. Un día normal no tiene que decir
         "estuve caída" en ningún resumen, y esta función es lo que hace
         que el test lo pueda afirmar."""
+        paso = timedelta(seconds=secretaria.CADA + trabajo)
         ahora = desde
         while ahora < hasta:
-            ahora = min(ahora + timedelta(seconds=secretaria.CADA), hasta)
-            self._vuelta(ahora)
+            proxima = min(ahora + paso, hasta)
+            self._vuelta(proxima, trabajo=min(
+                trabajo, (proxima - ahora).total_seconds()))
+            ahora = proxima
         return hasta
 
     def _arrancar_en(self, momento):
@@ -187,9 +218,16 @@ class UnDiaEntero(_Escenario):
     MANANA = datetime(2026, 8, 17, 7, 0)      # lunes, antes del primer corte
     MEDIODIA = datetime(2026, 8, 17, 12, 0)
 
-    def _correr_el_dia(self):
+    def _correr_el_dia(self, trabajo=0):
         """La noche deja cinco correos, el mediodía dos más, y el reloj
-        cruza los tres cortes del día."""
+        cruza los tres cortes del día.
+
+        `trabajo` es cuánto tarda revisar_casilla() en las dos vueltas
+        que de verdad clasifican correo -las otras encuentran la casilla
+        vacía y vuelven en el acto-. Con 0 el día es el de un helper que
+        avanza en pasos exactos; con 13*60 es un lunes con quince
+        correos entrando juntos, que es donde se ve si el hueco está
+        bien medido."""
         de_la_noche = [
             self._entra("<r1@x>", "Promoción 11 años", "RUIDO",
                         de="M2M Dataglobal <promo@m2m.com>"),
@@ -203,11 +241,12 @@ class UnDiaEntero(_Escenario):
                         de="administracion@fullcontrolgps.com.ar"),
         ]
         self._arrancar_en(self.MANANA)
-        self._vuelta(self.MANANA, de_la_noche)
+        manana = self._una_vuelta_mas(self.MANANA, de_la_noche,
+                                      trabajo=trabajo)
         # El reloj avanza tic a tic, como el de verdad: saltar de un
         # corte al siguiente sería indistinguible de una caída -y con
         # razón, es justo lo que detecta HUECO_CAIDA-.
-        self._hasta(self.MANANA, self.MEDIODIA)
+        self._hasta(manana, self.MEDIODIA)
 
         # El mediodía trae dos más: un ruido y algo para derivar.
         del_mediodia = [
@@ -216,9 +255,9 @@ class UnDiaEntero(_Escenario):
             self._entra("<n1@x>", "Factura agosto", "NATALIA",
                         de="Orbcomm <facturacion@orbcomm.com>"),
         ]
-        un_tic = self.MEDIODIA + timedelta(seconds=secretaria.CADA)
-        self._vuelta(un_tic, del_mediodia)
-        return self._hasta(un_tic, datetime(2026, 8, 17, 18, 15))
+        mediodia = self._una_vuelta_mas(self.MEDIODIA, del_mediodia,
+                                        trabajo=trabajo)
+        return self._hasta(mediodia, datetime(2026, 8, 17, 18, 15))
 
     def test_el_resumen_de_las_18_lista_todo_lo_que_se_archivo_en_el_dia(self):
         """La falla medida: día con ruidos archivados y, a las 18:00,
@@ -308,10 +347,41 @@ class UnDiaEntero(_Escenario):
     def test_un_dia_normal_no_dice_que_estuvo_caida(self):
         """El aviso de caída tiene que ser información, no ruido de
         fondo: si saliera todos los días, JP dejaría de leerlo justo
-        antes del día en que importa."""
-        self._correr_el_dia()
+        antes del día en que importa.
+
+        El día se corre con vueltas LENTAS -13 minutos de clasificación,
+        que con quince correos entrando juntos es perfectamente
+        alcanzable: ESPERA_RESPUESTA son 180s por pedido, dos pasadas
+        por correo, más el backoff de los 429-. Esto es lo que faltaba:
+        antes el helper avanzaba en pasos exactos de CADA y no modelaba
+        nunca el tiempo de trabajo, así que este test pasaba por
+        construcción. El hueco se medía como `ahora - ultimo_reloj`, y
+        ahí `ahora` es DESPUÉS de revisar la casilla: con HUECO_CAIDA de
+        900s alcanzaba con que una vuelta tardara más de 12 minutos para
+        que el proceso -vivo y trabajando- se avisara a sí mismo como
+        caído. Medido: "⚠️ Estuve caída desde el 17/08 a las 08:20 -16
+        minutos-" en el resumen de un lunes normal.
+        """
+        self._correr_el_dia(trabajo=13 * 60)
         for texto in self._textos():
             self.assertNotIn("Estuve caída", texto)
+
+    def test_una_vuelta_lenta_no_apaga_la_deteccion_de_una_caida_de_verdad(self):
+        """La contracara, para que el arreglo no sea "no avisar nunca":
+        un hueco de verdad -la Mac dormida, el proceso muerto- se sigue
+        viendo aunque la vuelta que lo descubre sea lenta."""
+        self._arrancar_en(self.MANANA)
+        # La Mac durmió tres horas y despertó a las 10: la vuelta que la
+        # descubre tarda 13 minutos porque encuentra toda la noche junta.
+        self._vuelta(datetime(2026, 8, 17, 10, 13),
+                     [self._entra("<t1@x>", "Cierre de etapa", "TUYO",
+                                  de="Suhr <suhr@cliente.com>")],
+                     trabajo=13 * 60)
+        self._hasta(datetime(2026, 8, 17, 10, 13),
+                    datetime(2026, 8, 17, 17, 5))
+
+        self.assertTrue(any("Estuve caída" in t for t in self._textos()),
+                        "un hueco de tres horas dejó de verse")
 
     def test_rever_a_las_18_devuelve_el_correo_y_lo_saca_de_ruido(self):
         """El circuito completo, atravesando los tres momentos: JP mira
@@ -498,6 +568,118 @@ class AtravesDeUnReinicio(_Escenario):
         self.assertEqual(memoria.situacion(self.s.cx, "<t1@x>"), "avisado")
 
 
+class ElResumenGrandeTampocoSeComeElRuido(_Escenario):
+    """El camino de MUCHO VOLUMEN, con ruido archivado en la base.
+
+    Es un hueco de prueba de la misma clase que los tres Críticos, y se
+    encontró midiendo: sacar el filtro `if c["message_id"] in
+    consumibles` del cierre de `_mandar_resumen_grande` **sobrevivía las
+    314 pruebas** y reproducía el CRÍTICO 1 entero por el otro camino
+    -lo archivado se consume en el resumen general y a las 18:00 no
+    queda nada que Rever-.
+
+    `mandar_resumen` tiene dos caminos y el arreglo del CRÍTICO 1 tocó
+    los dos, pero sólo uno quedó cubierto: `UnDiaEntero` es un día
+    normal, que entra cómodo en un mensaje. Ningún test cruzaba mucho
+    volumen CON ruido archivado, y ese cruce no es hipotético: el camino
+    de mucho volumen es justo el que corre después de una caída larga
+    -por eso `_mandar_resumen_grande` habla de "Volviste con N
+    esperando"-, o sea al mismo tiempo que el CRÍTICO 3, y la caída
+    larga es también cuando más ruido hay acumulado sin listar.
+    """
+
+    MURIO = datetime(2026, 8, 17, 7, 0)
+    VOLVIO = datetime(2026, 8, 17, 19, 0)
+
+    def setUp(self):
+        super().setUp()
+        self._arrancar_en(self.MURIO)
+
+    def _el_atraso(self, cuantos):
+        """El atraso que deja una caída larga: correos de JP ya
+        clasificados que todavía no entraron en ningún resumen.
+
+        Se anotan derecho en la base y no por el ciclo: lo que se prueba
+        acá es el resumen, y hacer pasar ciento veinte correos por
+        revisar_casilla no agrega ninguna costura -sí agrega ciento
+        veinte vueltas-."""
+        for n in range(cuantos):
+            memoria.anotar(self.s.cx, {
+                "message_id": f"<t{n}@x>", "uid": "1", "uidvalidity": "1",
+                "de": f"Cliente Con Nombre Largo {n} <cliente{n}@ejemplo.com>",
+                "para": "jp@x", "cc": "",
+                "asunto": f"Asunto largo número {n} " + "x" * 40,
+                "fecha": "Mon, 17 Aug 2026 09:00:00 -0300",
+                "cuerpo": "cuerpo", "adjuntos": []}, "TUYO", "m")
+
+    def _la_caida_larga(self):
+        """Tres ruidos archivados de verdad a las 7, ciento veinte
+        correos de JP acumulados, y launchd la levanta a las 19."""
+        self._vuelta(self.MURIO, [
+            self._entra("<r1@x>", "Promoción 11 años", "RUIDO",
+                        de="M2M Dataglobal <promo@m2m.com>"),
+            self._entra("<r2@x>", "Desayuno ESS+ 2026", "RUIDO",
+                        de="Ruptela <eventos@ruptela.com>"),
+            self._entra("<r3@x>", "4 empleos para vos", "RUIDO",
+                        de="LinkedIn <jobs@linkedin.com>"),
+        ])
+        self.assertEqual(self._situaciones("<r1@x>", "<r2@x>", "<r3@x>"),
+                         ["archivado"] * 3,
+                         "el escenario no arrancó: no se archivó nada")
+        self._el_atraso(120)
+
+        self.s.parada.set()
+        self.s = secretaria.Secretaria(cx=memoria.abrir(self.ruta))
+        self.mensajes.clear()
+        self._vuelta(self.VOLVIO)
+
+    def _el_de_ruido(self):
+        return next((m for m in self.mensajes
+                     if "Lo que archivé hoy" in m[0]), None)
+
+    def test_el_resumen_de_recuperacion_va_por_el_camino_de_mucho_volumen(self):
+        """Sin esto, los otros dos tests de esta clase podrían pasar sin
+        haber entrado nunca a _mandar_resumen_grande -y no dirían nada
+        sobre el filtro que cuidan-."""
+        self._la_caida_larga()
+        partes = [t for t in self._textos() if "parte 1/" in t]
+        self.assertTrue(partes,
+                        f"el resumen entró en un solo mensaje: este"
+                        f" escenario no prueba el camino grande."
+                        f" Mensajes: {[t[:60] for t in self._textos()]}")
+
+    def test_lo_archivado_llega_entero_a_la_lista_de_las_18(self):
+        """La falla que la mutación reproduce: el resumen general de
+        recuperación consume lo archivado en su cierre -donde el ruido
+        se cuenta pero no se lista- y a las 18:00 no queda nada."""
+        self._la_caida_larga()
+
+        de_ruido = self._el_de_ruido()
+        self.assertIsNotNone(de_ruido, "no salió el resumen de las 18:00")
+        texto, teclado = de_ruido
+        self.assertNotIn("No archivé nada", texto)
+        for asunto in ("Promoción 11 años", "Desayuno ESS+ 2026",
+                       "4 empleos para vos"):
+            self.assertIn(asunto, texto,
+                          f"«{asunto}» se archivó y no está en la lista de"
+                          f" las 18:00: dejó de ser reversible")
+        etiquetas = [b["text"] for f in teclado["inline_keyboard"] for b in f]
+        self.assertIn("🔁 Rever", etiquetas)
+
+    def test_el_cierre_del_resumen_grande_cuenta_el_ruido_pero_no_lo_consume(self):
+        """El mismo reparto de dueños que en el camino normal: el cierre
+        del resumen grande dice "Se archivaron N como ruido" -eso es
+        información- y no toca la situación."""
+        self._la_caida_larga()
+
+        cierre = next(t for t in self._textos()
+                      if "Eso es lo que entra acá" in t)
+        self.assertIn("Se archivaron 3 como ruido", cierre)
+        # Y después del de las 18:00 sí: ahí sí tienen dueño.
+        self.assertEqual(self._situaciones("<r1@x>", "<r2@x>", "<r3@x>"),
+                         ["en_resumen"] * 3)
+
+
 class ElAvisoAlToqueNoSeDaPorEntregado(_Escenario):
     """CRÍTICO 2: enviar() devuelve None cuando falla y no levanta nada,
     y memoria.cambiar(..., "avisado") corría igual.
@@ -581,6 +763,47 @@ class ElAvisoAlToqueNoSeDaPorEntregado(_Escenario):
         self.telegram_anda = True
         self._vuelta(datetime(2026, 8, 17, 11, 45), en_horario=True)
         self.assertTrue(any("No pude decidir" in t for t in self._textos()))
+
+    def test_el_duda_avisado_no_se_vuelve_a_avisar_en_cada_vuelta(self):
+        """La contracara del arreglo de arriba, y ninguno de los 314
+        tests la miraba: cuando el aviso SÍ sale, el correo tiene que
+        salir de la cola.
+
+        avisar_en_el_momento marca "avisado" al salir bien;
+        avisar_para_que_decida no marcaba nada, así que el correo se
+        quedaba en "pendiente_de_avisar" y _atender_avisos_pendientes
+        -que no tiene tope, y con razón- lo reintentaba en CADA vuelta
+        del ciclo. Medido: 5 vueltas con Telegram ya restablecido, 5
+        mensajes idénticos y 5 tandas. El ciclo de correo no tiene reja
+        de horario: un DUDA que falla a las 17:05 son ~300 mensajes
+        durante la noche, y DUDA son 11 de 46.
+        """
+        self.telegram_anda = False
+        c = self._entra("<duda@x>", "Orbcomm — factura y contrato", "DUDA")
+        with self._contexto([c], en_horario=True):
+            self.s.revisar_casilla()
+        self.assertEqual(memoria.situacion(self.s.cx, "<duda@x>"),
+                         "pendiente_de_avisar")
+
+        # Telegram vuelve. Cinco vueltas más del ciclo, sin nada nuevo.
+        self.telegram_anda = True
+        self.mensajes.clear()
+        for n in range(1, 6):
+            self._vuelta(self.HORA + timedelta(seconds=secretaria.CADA * n),
+                         en_horario=True)
+
+        repetidos = [t for t in self._textos() if "No pude decidir" in t]
+        self.assertEqual(len(repetidos), 1,
+                         f"el aviso salió {len(repetidos)} veces en 5"
+                         f" vueltas: a ese ritmo son ~20 por hora hasta"
+                         f" el próximo corte")
+        self.assertEqual(len(self.s.abiertos), 1,
+                         "una tanda nueva por vuelta: todos los botones"
+                         " menos los últimos quedan huérfanos")
+        self.assertEqual(memoria.situacion(self.s.cx, "<duda@x>"),
+                         "mostrado_sin_clasificar",
+                         "sigue en la cola después de haberse entregado:"
+                         " se va a reintentar para siempre")
 
 
 class LasTandasNoSePisan(_Escenario):
@@ -789,6 +1012,102 @@ class ElAvisoDeCorreoPerdidoDiceLaVerdad(unittest.TestCase):
         self.assertIn("No lo encuentro", enviar.call_args[0][0])
         self.assertEqual(memoria.situacion(self.s.cx, "<p@x>"),
                          "no_se_pudo_archivar")
+
+
+class NingunTestSaleALaRed(unittest.TestCase):
+    """La reja de `tests/sin_red.py`, probada.
+
+    Medido antes de ponerla: la suite intentaba salir a api.telegram.org
+    20 veces desde dos tests que no parcheaban `Secretaria.enviar`. Con
+    la red andando eso no falla: le manda mensajes DE VERDAD al teléfono
+    de JP cada vez que alguien corre los tests.
+
+    Parchear esos dos arregla esos dos. Esto es para el próximo que se
+    olvide: que se entere en el acto, y no JP por Telegram.
+    """
+
+    def test_salir_a_internet_rompe_el_test_en_el_acto(self):
+        with self.assertRaises(sin_red.RedDeVerdad):
+            socket.create_connection(("api.telegram.org", 443), timeout=1)
+
+    def test_tambien_por_el_socket_armado_a_mano(self):
+        """create_connection es el camino de urllib y de imaplib, pero
+        no es el único: el que arme el socket a mano tiene que chocar
+        con la misma reja."""
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.addCleanup(s.close)
+        with self.assertRaises(sin_red.RedDeVerdad):
+            s.connect(("149.154.167.220", 443))   # api.telegram.org
+
+    def test_el_mensaje_dice_que_parchear(self):
+        """Un test que salta acá tiene que saber qué hacer sin ir a leer
+        el código de la reja: el mensaje es la mitad del arreglo."""
+        with self.assertRaises(sin_red.RedDeVerdad) as cm:
+            socket.create_connection(("api.telegram.org", 443), timeout=1)
+        texto = str(cm.exception)
+        self.assertIn("enviar", texto)
+        self.assertIn("IMAP4_SSL", texto)
+
+    def test_la_reja_no_se_la_come_el_reintento_de_bot_tg(self):
+        """Por qué RedDeVerdad no es un OSError: bot.tg() reintenta cinco
+        veces ante un OSError y Secretaria.enviar() se traga cualquier
+        Exception y devuelve None. Un corte que se pareciera a "la red
+        está caída" dejaría pasar el test igual, en silencio, que es
+        justo la mitad del problema que la reja viene a resolver."""
+        with mock.patch.dict(os.environ, {"TELEGRAM_BOT_TOKEN": "x",
+                                          "TELEGRAM_CHAT_ID": "1"}):
+            with self.assertRaises(sin_red.RedDeVerdad):
+                bot.tg("sendMessage", chat_id="1", text="hola")
+
+    def test_tampoco_se_la_tragan_los_except_anchos_de_secretaria(self):
+        """La otra mitad, y es la que se aprendió midiendo: el segundo de
+        los dos tests que salían a la red seguía saliendo después de
+        parchearlo una vez y PASABA IGUAL, porque el intento caía adentro
+        del `except (Exception, SystemExit)` de
+        _atender_revers_pendientes. Esos manejadores anchos existen para
+        que nada mate el hilo del correo y se tragaban también la reja.
+        Por eso RedDeVerdad hereda de BaseException."""
+        f = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        s = secretaria.Secretaria(cx=memoria.abrir(f.name))
+        c = correo_de(BuzonFalso().agregar("INBOX", de="a@x", asunto="Algo",
+                                           message_id="<a@x>"), "1")
+
+        with mock.patch.dict(os.environ, {"TELEGRAM_BOT_TOKEN": "x",
+                                          "TELEGRAM_CHAT_ID": "1"}), \
+             mock.patch.object(secretaria.correo, "traer_nuevos",
+                               return_value=[c]), \
+             mock.patch.object(secretaria.clasificador, "clasificar",
+                               side_effect=RuntimeError("sin motores")), \
+             mock.patch.object(secretaria.reglas, "es_ruido_conocido",
+                               return_value=None):
+            # revisar_casilla tiene su propio except (Exception,
+            # SystemExit) alrededor de clasificar(): la reja tiene que
+            # atravesarlo igual.
+            with self.assertRaises(sin_red.RedDeVerdad):
+                s.revisar_casilla()
+
+    def test_lo_local_sigue_andando(self):
+        """La reja corta internet, no los sockets: un servidor de
+        mentira en 127.0.0.1 es exactamente lo que hay que poder hacer
+        en vez de salir afuera."""
+        servidor = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.addCleanup(servidor.close)
+        servidor.bind(("127.0.0.1", 0))
+        servidor.listen(1)
+
+        cliente = socket.create_connection(servidor.getsockname(), timeout=2)
+        self.addCleanup(cliente.close)
+        self.assertIsNotNone(cliente)
+
+    def test_queda_registrado_para_poder_medirlo(self):
+        """`sin_red.INTENTOS` es lo que permite medir: la suite verde con
+        esa lista vacía es la prueba de que nadie lo intentó, que es
+        como se midió el antes (20 intentos) y el después (0)."""
+        antes = len(sin_red.INTENTOS)
+        with self.assertRaises(sin_red.RedDeVerdad):
+            socket.create_connection(("api.telegram.org", 443), timeout=1)
+        self.assertEqual(len(sin_red.INTENTOS), antes + 1)
+        self.assertEqual(sin_red.INTENTOS[-1][0], "api.telegram.org")
 
 
 if __name__ == "__main__":

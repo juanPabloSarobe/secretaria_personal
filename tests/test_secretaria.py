@@ -450,11 +450,20 @@ class RevisarCasilla(unittest.TestCase):
 
     def test_lo_sin_clasificar_nunca_se_archiva(self):
         """Si no respondió ningún motor, el correo se le muestra a JP. El
-        silencio jamás significa 'era ruido'."""
+        silencio jamás significa 'era ruido'.
+
+        `enviar` se parchea y no es decoración: sin eso, este test
+        mandaba el "⚠️ No pude decidir" al Telegram DE VERDAD de JP -era
+        uno de los dos que salían a la red, ver tests/sin_red.py-, y
+        además quedaba a merced de la red para decidir si pasaba: con
+        Telegram caído el aviso no sale, el correo queda en
+        "pendiente_de_avisar" y la afirmación de abajo falla por un
+        motivo que no tiene nada que ver con lo que el test cuida."""
         with mock.patch.object(secretaria.correo, "traer_nuevos",
                                return_value=[correo_falso("<1@x>", "Algo")]), \
              mock.patch.object(secretaria.clasificador, "clasificar",
                                side_effect=RuntimeError("sin motores")), \
+             mock.patch.object(self.s, "enviar", return_value={"ok": True}), \
              mock.patch.object(secretaria.correo, "mover_a") as mover:
             self.s.revisar_casilla()
         mover.assert_not_called()

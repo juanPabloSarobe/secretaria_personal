@@ -272,9 +272,14 @@ class Secretaria:
     def ciclo_de_correo(self):
         while not self.parada.is_set():
             try:
+                # Cuándo EMPEZÓ esta vuelta, antes de tocar la casilla.
+                # Es lo que _disparar_resumenes necesita para distinguir
+                # "estuve caída" de "esta vuelta tardó": lo que sigue
+                # puede llevarse quince minutos y eso no es un hueco.
+                arranque = datetime.now()
                 self.revisar_casilla()
                 ahora = datetime.now()
-                self._disparar_resumenes(ahora)
+                self._disparar_resumenes(ahora, arranque)
                 memoria.latido(self.cx, ahora.isoformat(timespec="seconds"))
             except (Exception, SystemExit) as e:
                 # Nada que pase acá adentro puede matar el proceso: si se
@@ -293,7 +298,7 @@ class Secretaria:
                 _registrar("correo", e)
             self.parada.wait(CADA)
 
-    def _disparar_resumenes(self, ahora):
+    def _disparar_resumenes(self, ahora, arranque=None):
         """Manda los resúmenes que correspondan entre `self.ultimo_reloj`
         y `ahora`, y actualiza el reloj interno.
 
@@ -305,9 +310,41 @@ class Secretaria:
         piso, porque si no la vuelta siguiente compararía contra un
         `ultimo_reloj` adelantado y podría volver a disparar un resumen
         que ya se mandó.
+
+        `arranque` es cuándo EMPEZÓ esta vuelta del ciclo, y es contra
+        eso -no contra `ahora`- que se mide el hueco. La diferencia
+        importa: `ciclo_de_correo` llama acá DESPUÉS de revisar_casilla,
+        así que `ahora - ultimo_reloj` es wait(CADA) MÁS lo que tardó el
+        trabajo. Con HUECO_CAIDA = 900s alcanzaba con que una vuelta de
+        clasificación tardara más de 12 minutos para que el proceso
+        -vivo y trabajando- se avisara a sí mismo como caído; medido,
+        13 minutos de trabajo daban "⚠️ Estuve caída desde el 17/08 a
+        las 08:20 -16 minutos-" en el resumen de un lunes normal. Y 13
+        minutos no es raro: ESPERA_RESPUESTA son 180s por pedido, dos
+        pasadas por correo, más el backoff de los 429.
+
+        Medido contra `arranque`, el hueco es lo que el proceso NO
+        estuvo trabajando -la espera entre dos vueltas, unos 180s, o el
+        tiempo entero que estuvo muerto o dormido-, que es lo que
+        "estuve caída" quiere decir.
+
+        Lo que se pierde a cambio: una Mac que se suspende en el medio
+        de revisar_casilla queda adentro de "el trabajo tardó" y no se
+        anuncia como caída. Los resúmenes de ese hueco salen igual
+        -momentos_pendientes sigue mirando de `ultimo_reloj` a `ahora`-;
+        lo único que falta es el encabezado. Se elige ese lado a
+        propósito: un "Estuve caída" falso cada lunes ocupado es
+        exactamente lo que hace que JP deje de leerlo el día que es
+        verdad.
+
+        `ahora` sigue siendo el que manda para los resúmenes y para el
+        reloj: lo que corresponde mandar es todo lo que se cruzó hasta
+        este instante, no hasta que empezó la vuelta.
         """
-        if (ahora - self.ultimo_reloj).total_seconds() > HUECO_CAIDA:
-            self.caida_desde, self.caida_hasta = self.ultimo_reloj, ahora
+        if arranque is None:
+            arranque = ahora
+        if (arranque - self.ultimo_reloj).total_seconds() > HUECO_CAIDA:
+            self.caida_desde, self.caida_hasta = self.ultimo_reloj, arranque
         pendientes = self.reloj.momentos_pendientes(ahora, self.ultimo_reloj)
         if pendientes:
             # Si se perdieron varios -una caída de días, o un fin de
@@ -862,6 +899,28 @@ class Secretaria:
         JP- no volvía a aparecer nunca. Ahora, si no salió, queda en
         cola.
 
+        Y la contracara, que faltaba: cuando SÍ sale, el correo pasa a
+        "mostrado_sin_clasificar", que es la situación que este docstring
+        dice que le corresponde. Sin esto, un aviso que había fallado una
+        vez se quedaba en "pendiente_de_avisar" PARA SIEMPRE:
+        avisar_en_el_momento marca "avisado" al salir bien, éste no
+        marcaba nada, y _atender_avisos_pendientes lo reintenta en cada
+        vuelta del ciclo sin tope -y sin tope con razón, ver su
+        docstring-. Medido: 5 vueltas con Telegram ya restablecido daban
+        5 mensajes idénticos de "⚠️ No pude decidir", uno por vuelta, más
+        una tanda nueva en self.abiertos cada vez. El ciclo de correo no
+        tiene reja de horario, así que son unos 20 por hora hasta el
+        próximo corte: un DUDA que falla a las 17:05 son ~300 mensajes
+        durante la noche. Y DUDA no es un caso raro: son 11 de 46.
+
+        No es la misma situación que "avisado" a propósito. "avisado" es
+        terminal -JP ya lo vio y no vuelve a aparecer por ningún lado-;
+        acá el sistema todavía no sabe qué es el correo, así que
+        "mostrado_sin_clasificar" es lo correcto: ya se le mostró, y
+        sigue esperando que JP diga qué era. Es también la situación con
+        la que memoria.anotar() lo dejó al entrar (DUDA y ERROR nacen
+        ahí), así que esto lo devuelve a donde estaba.
+
         Devuelve si el aviso salió de verdad.
         """
         tanda = self._nueva_tanda()
@@ -873,6 +932,7 @@ class Secretaria:
         if not self.enviar(texto, bot.teclado(1, tanda)):
             memoria.cambiar(self.cx, c["message_id"], "pendiente_de_avisar")
             return False
+        memoria.cambiar(self.cx, c["message_id"], "mostrado_sin_clasificar")
         self.abiertos[tanda] = [c["message_id"]]
         return True
 
