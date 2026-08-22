@@ -55,7 +55,9 @@ class Reloj:
 
     Recibe el ahora y el último momento en que se lo consultó, así se puede
     probar con fechas inventadas. Si la secretaria estuvo caída doce horas
-    —o varios días—, devuelve todo lo que se perdió, en orden.
+    —o varios días—, devuelve todo lo que se perdió, en orden. Sábado y
+    domingo no generan cortes -los MOMENTOS son de días hábiles, igual que
+    en_horario()-, así que un fin de semana caído no cuenta como perdido.
     """
 
     def momentos_pendientes(self, ahora, ultimo):
@@ -70,10 +72,17 @@ class Reloj:
         dia = ultimo.date()
         un_dia = timedelta(days=1)
         while dia <= ahora.date():
-            for nombre, h, m in MOMENTOS:
-                corte = datetime(dia.year, dia.month, dia.day, h, m)
-                if ultimo < corte <= ahora:
-                    salida.append(nombre)
+            if dia.weekday() < 5:  # los MOMENTOS son de días hábiles,
+                # igual que en_horario(): un sábado o domingo no
+                # corresponde ningún corte, aunque caiga dentro del
+                # rango. Sin esto, una caída de viernes a la tarde a
+                # lunes a la mañana -un fin de semana largo, nada raro-
+                # dispara los tres cortes de sábado y los tres de
+                # domingo de una sola vez al volver.
+                for nombre, h, m in MOMENTOS:
+                    corte = datetime(dia.year, dia.month, dia.day, h, m)
+                    if ultimo < corte <= ahora:
+                        salida.append(nombre)
             dia += un_dia
         return salida
 
@@ -102,6 +111,11 @@ class Secretaria:
         self.offset = 0
         self.parada = threading.Event()
         self.pausada = False
+        # Qué message_id puede cerrar cada tanda de resumen con "Leí
+        # todo": sin esto el botón no sabe cuáles marcar, y como los
+        # botones de Telegram no vencen, dos resúmenes del mismo día no
+        # pueden compartir token (ver armar_resumen).
+        self.abiertos = {}
 
     def ciclo_de_correo(self):
         while not self.parada.is_set():
@@ -130,9 +144,18 @@ class Secretaria:
         `ultimo_reloj` adelantado y podría volver a disparar un resumen
         que ya se mandó.
         """
-        for momento in self.reloj.momentos_pendientes(
-                ahora, self.ultimo_reloj):
-            self.mandar_resumen(momento)
+        pendientes = self.reloj.momentos_pendientes(ahora, self.ultimo_reloj)
+        if pendientes:
+            # Si se perdieron varios -una caída de días, o un fin de
+            # semana largo que el filtro de arriba no alcanzó a
+            # absorber del todo- mandarlos todos de a uno sería una
+            # andanada apenas se reconecta. JP quiere saber qué pasó,
+            # no reconstruir una cronología resumen por resumen: uno
+            # solo alcanza, y como mandar_resumen arma su contenido a
+            # partir de lo que sigue sin resumir en la base (no de qué
+            # momento se lo llamó), ese único envío ya junta todo lo
+            # pendiente, no sólo lo del último corte.
+            self.mandar_resumen(pendientes[-1])
         if ahora > self.ultimo_reloj:
             self.ultimo_reloj = ahora
 
@@ -506,8 +529,89 @@ class Secretaria:
             return None
         return respuesta
 
+    SALUDO = {"manana": "Buen día.", "tarde": "Cierre del día.",
+              "ruido": "Lo que archivé hoy."}
+
+    def armar_resumen(self, correos, momento):
+        """El texto y los botones de un resumen.
+
+        Lo de JP y lo derivable van arriba y sin botón de cierre: quedan
+        abiertos hasta que JP haga algo con ellos -eso lo maneja el
+        manejo de botones de la tarea 11, no esta función-. Lo del
+        equipo se cierra de un toque, con "Leí todo".
+        """
+        import secrets
+        tanda = secrets.token_hex(2)
+        mios = [c for c in correos if c["categoria"] == "TUYO"]
+        derivar = [c for c in correos if c["categoria"] in ("ENZO", "NATALIA")]
+        equipo = [c for c in correos if c["categoria"] == "DELEGADO"]
+        ruido = [c for c in correos if c["categoria"] == "RUIDO"]
+
+        if not correos:
+            # "No entró nada nuevo" es información, no la ausencia de
+            # ella: si la secretaria se rompe y deja de avisar, el
+            # silencio se parece demasiado a un día tranquilo. Por eso
+            # el resumen sale siempre, aunque no haya nada que contar.
+            return (f"{self.SALUDO[momento]} No entró nada nuevo.",
+                    {"inline_keyboard": []})
+
+        lineas = [f"{self.SALUDO[momento]} Entraron {len(correos)} correos."]
+        if mios:
+            lineas.append(f"\n📌 <b>Tuyo ({len(mios)})</b>")
+            lineas += [f"  · {html.escape(c['de'][:34])} — "
+                       f"{html.escape(c['asunto'][:48])}" for c in mios]
+        if derivar:
+            lineas.append(f"\n➡️ <b>Para derivar ({len(derivar)})</b>")
+            lineas += [f"  · {html.escape(c['asunto'][:44])} → "
+                       f"{c['categoria'].title()}" for c in derivar]
+        if equipo:
+            lineas.append(f"\n✅ <b>El equipo lo maneja ({len(equipo)})</b>")
+            lineas += [f"  {n}. {html.escape(c['de'][:26])} — "
+                       f"{html.escape(c['asunto'][:40])}"
+                       for n, c in enumerate(equipo, 1)]
+        if ruido:
+            lineas.append(f"\n🗑 Archivado como ruido: {len(ruido)}")
+
+        filas = []
+        if equipo:
+            filas.append([{"text": "✓ Leí todo",
+                           "callback_data": f"t|{tanda}-0|equipo"},
+                          {"text": "⚠ Uno es mío",
+                           "callback_data": f"m|{tanda}-0|equipo"}])
+        # Asocia esta tanda con los correos que "Leí todo" puede cerrar.
+        # Sin esto, el botón no sabría a cuáles marcar como leídos -y
+        # como cada tanda tiene su propio token, un resumen viejo nunca
+        # puede cerrar los correos de uno nuevo.
+        self.abiertos[tanda] = [c["message_id"] for c in equipo]
+        return "\n".join(lineas), {"inline_keyboard": filas}
+
     def mandar_resumen(self, momento):
-        raise NotImplementedError("tarea 9")
+        """Junta lo pendiente de resumir y lo manda por Telegram.
+
+        Entran los correos que siguen en "clasificado" (lo de JP y lo
+        para derivar que no interrumpió porque llegó fuera de horario, y
+        todo lo del equipo, que nunca interrumpe) y en "archivado" (el
+        ruido que ya se movió a INBOX.Ruido). Lo que ya se avisó al
+        toque (avisar_en_el_momento) no vuelve a aparecer acá: ya lo
+        vio.
+
+        Sin corte por fecha (desde="") a propósito: si algo quedara sin
+        resumir por algún borde no previsto, tiene que aparecer en el
+        próximo resumen que salga, no perderse en silencio hasta que
+        alguien lo note a mano.
+        """
+        correos = (memoria.del_dia(self.cx, "clasificado", "") +
+                   memoria.del_dia(self.cx, "archivado", ""))
+        texto, teclado = self.armar_resumen(correos, momento)
+        resultado = self.enviar(texto, teclado)
+        if resultado:
+            # Recién si el envío salió de verdad se consumen: si
+            # Telegram está caído, tienen que quedar donde están para
+            # que el próximo resumen los vuelva a incluir -mismo criterio
+            # que _avisar_la_falla con el archivado que no se pudo
+            # confirmar.
+            for c in correos:
+                memoria.cambiar(self.cx, c["message_id"], "en_resumen")
 
     def atender(self, update):
         raise NotImplementedError("tarea 11")

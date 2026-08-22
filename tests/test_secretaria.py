@@ -109,6 +109,18 @@ class Reloj(unittest.TestCase):
         self.assertEqual(pendientes[:3], ["manana", "tarde", "ruido"])
         self.assertEqual(pendientes[-3:], ["manana", "tarde", "ruido"])
 
+    def test_no_dispara_resumenes_en_fin_de_semana(self):
+        """Los MOMENTOS son para días hábiles, igual que en_horario(). Sin
+        este filtro, una caída de viernes 16:00 a lunes 9:00 -fin de
+        semana largo, nada raro- dispara nueve resúmenes de golpe al
+        volver: los tres de sábado y los tres de domingo no corresponden
+        a nada, porque nadie mira Telegram un sábado a las 8:30 esperando
+        el briefing de la secretaria. 21/8/2026 es viernes."""
+        pendientes = self.r.momentos_pendientes(
+            ahora=datetime(2026, 8, 24, 9, 0),
+            ultimo=datetime(2026, 8, 21, 16, 0))
+        self.assertEqual(pendientes, ["tarde", "ruido", "manana"])
+
     def test_dispara_justo_en_el_minuto_del_corte(self):
         """El corte es inclusive del lado de `ahora`: si el reloj marca
         exactamente el minuto, ya corresponde."""
@@ -230,6 +242,48 @@ class ElRelojInternoSoloAvanza(unittest.TestCase):
         s._disparar_resumenes(datetime(2026, 8, 17, 8, 35))
         self.assertEqual(disparados, ["manana"])
         self.assertEqual(s.ultimo_reloj, datetime(2026, 8, 17, 8, 35))
+
+
+class NoMandaUnaAndanadaSiSePerdieronVarios(unittest.TestCase):
+    """Si la secretaria estuvo caída y se perdieron varios resúmenes -un
+    fin de semana largo, o una caída de días entre semana-, mandarlos
+    todos de a uno sería una andanada de mensajes apenas se reconecta.
+    JP abre el teléfono y quiere saber qué pasó, no reconstruir una
+    cronología resumen por resumen: uno solo, que junte todo lo
+    pendiente, alcanza -y como mandar_resumen ya arma su contenido a
+    partir de lo que sigue en la base sin resumir, ese único envío
+    igual cuenta todo, no sólo lo del último momento."""
+
+    def test_varios_momentos_pendientes_mandan_un_solo_resumen(self):
+        s = secretaria.Secretaria(cx=_CxMuda())
+        disparados = []
+        s.mandar_resumen = disparados.append
+        s.reloj.momentos_pendientes = lambda ahora, ultimo: [
+            "manana", "tarde", "ruido"]
+
+        s._disparar_resumenes(datetime(2026, 8, 24, 9, 0))
+
+        self.assertEqual(disparados, ["ruido"])
+
+    def test_un_solo_momento_pendiente_se_manda_igual(self):
+        s = secretaria.Secretaria(cx=_CxMuda())
+        disparados = []
+        s.mandar_resumen = disparados.append
+        s.reloj.momentos_pendientes = lambda ahora, ultimo: ["manana"]
+
+        s._disparar_resumenes(datetime(2026, 8, 24, 8, 31))
+
+        self.assertEqual(disparados, ["manana"])
+
+    def test_nada_pendiente_no_manda_nada(self):
+        s = secretaria.Secretaria(cx=_CxMuda())
+        disparados = []
+        s.mandar_resumen = disparados.append
+        s.reloj.momentos_pendientes = lambda ahora, ultimo: []
+
+        s._disparar_resumenes(datetime(2026, 8, 24, 8, 31))
+
+        self.assertEqual(disparados, [])
 
 
 class ElManejadorDeExcepcionesNoTiraNada(unittest.TestCase):
