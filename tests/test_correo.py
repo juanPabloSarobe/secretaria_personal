@@ -1063,5 +1063,98 @@ class TraerNuevos(unittest.TestCase):
 
 
 
+class _BuzonQueAnotaElModo(BuzonFalso):
+    """BuzonFalso que además se acuerda de CON QUÉ readonly se lo
+    seleccionó.
+
+    BuzonFalso sólo guarda el nombre de la carpeta, y el nombre es justo
+    lo que nunca estuvo en discusión.
+    """
+
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        self.modos = []
+
+    def select(self, carpeta, readonly=True):
+        self.modos.append((carpeta, readonly))
+        return super().select(carpeta, readonly=readonly)
+
+
+class AbrirBuzonEsDeSoloLectura(unittest.TestCase):
+    """La otra regla no negociable del proyecto, al lado de BODY.PEEK[]:
+    `readonly=True` al leer.
+
+    La de BODY.PEEK sí tenía red -el doble revienta si el FETCH no lo
+    lleva, ver test_no_marca_como_leido_lo_que_no_lo_estaba- pero ésta no
+    tenía ninguna: mutando el default de abrir_buzon() a False, los 279
+    tests pasaban igual. Y las consecuencias son las mismas que las de un
+    FETCH sin PEEK, porque son el mismo daño por otra puerta: con la
+    carpeta abierta en escritura, un FETCH marca como leídos los mensajes
+    que no lo estaban, y en la casilla real de JP eso no se deshace
+    cómodamente.
+
+    Se pincha `imaplib.IMAP4_SSL` y no `abrir_buzon`, porque abrir_buzon
+    es justamente lo que se está probando.
+    """
+
+    def setUp(self):
+        self.env = mock.patch.dict(os.environ, {
+            "IMAP_HOST": "imap.test", "IMAP_PORT": "993",
+            "IMAP_USER": "u", "IMAP_PASSWORD": "p"})
+        self.env.start()
+        self.addCleanup(self.env.stop)
+
+    def _buzon(self):
+        buzon = _BuzonQueAnotaElModo(uidvalidity=VALIDEZ)
+        buzon.agregar("INBOX", de="Promo <promo@ejemplo.com>",
+                      asunto="Oferta de agosto", fecha=hace(0),
+                      message_id="<uno@x>")
+        buzon.modos.clear()      # el agregar() no selecciona nada
+        return buzon
+
+    def test_por_defecto_abre_en_solo_lectura(self):
+        """El default es lo que mutó y sobrevivió la suite entera."""
+        buzon = self._buzon()
+        with mock.patch.object(correo.imaplib, "IMAP4_SSL",
+                               return_value=buzon):
+            correo.abrir_buzon()
+        self.assertEqual(buzon.modos, [("INBOX", True)])
+
+    def test_solo_se_abre_en_escritura_si_se_lo_piden_explicitamente(self):
+        """La otra mitad: el default tiene que ser True Y el parámetro
+        tiene que llegar. Sin este test, un abrir_buzon que ignorara el
+        parámetro y abriera siempre readonly pasaría el de arriba."""
+        buzon = self._buzon()
+        with mock.patch.object(correo.imaplib, "IMAP4_SSL",
+                               return_value=buzon):
+            correo.abrir_buzon(readonly=False)
+        self.assertEqual(buzon.modos, [("INBOX", False)])
+
+    def test_traer_nuevos_nunca_abre_la_casilla_en_escritura(self):
+        """El camino de lectura completo, de punta a punta: es el que
+        corre cada tres minutos sobre la casilla real, y el único que
+        toca correo que JP todavía no vio."""
+        buzon = self._buzon()
+        with mock.patch.object(correo.imaplib, "IMAP4_SSL",
+                               return_value=buzon):
+            correo.traer_nuevos(date.today() - timedelta(days=1))
+        self.assertTrue(buzon.modos, "no seleccionó ninguna carpeta")
+        for carpeta, readonly in buzon.modos:
+            self.assertTrue(readonly,
+                            f"abrió {carpeta} en escritura para leer: un"
+                            f" FETCH ahí marca como leído lo que no lo"
+                            f" estaba")
+
+    def test_leer_no_deja_marcado_como_leido_lo_que_no_lo_estaba(self):
+        """La consecuencia, no el mecanismo. Sin readonly ni PEEK, esto
+        es lo que le pasa a la casilla de JP."""
+        buzon = self._buzon()
+        with mock.patch.object(correo.imaplib, "IMAP4_SSL",
+                               return_value=buzon):
+            correo.traer_nuevos(date.today() - timedelta(days=1))
+        for m in buzon.carpetas["INBOX"]:
+            self.assertNotIn("\\Seen", m.flags)
+
+
 if __name__ == "__main__":
     unittest.main()
