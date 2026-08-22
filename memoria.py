@@ -258,11 +258,20 @@ def corregir(cx, message_id, categoria_nueva, explicacion):
     """Guarda que JP dijo otra cosa, y por qué.
 
     No pisa `categoria`: lo que dijo el sistema hay que conservarlo, si no
-    se pierde la comparación que permite medir si mejora."""
+    se pierde la comparación que permite medir si mejora.
+
+    Tampoco toca `situacion`. Antes la dejaba en 'corregido' por su
+    cuenta, pero el único llamador (rever_ruido, en secretaria.py) la
+    pisaba siempre en el paso siguiente -con 'clasificado' si la
+    categoría nueva es accionable, o 'mostrado_sin_clasificar' si no- así
+    que ese 'corregido' nunca llegaba a ser observable: era una
+    escritura de más, sin ningún lector. Decidir qué situación
+    corresponde después de una corrección depende de qué se va a hacer
+    con esa corrección, y eso lo sabe quien llama, no esta función.
+    """
     with _CANDADO:
         cx.execute("UPDATE correos SET categoria_jp = ?, explicacion = ?,"
-                   " situacion = 'corregido', actualizado = ?"
-                   " WHERE message_id = ?",
+                   " actualizado = ? WHERE message_id = ?",
                    (categoria_nueva, explicacion, _ahora(), message_id))
         cx.commit()
 

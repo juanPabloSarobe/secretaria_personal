@@ -222,6 +222,51 @@ class MandarResumenCaminoGrande(unittest.TestCase):
             self.assertEqual(memoria.situacion(self.s.cx, c["message_id"]),
                              "clasificado")
 
+    def test_un_corregido_por_rever_aparece_tambien_en_el_camino_grande(self):
+        """Ronda de arreglo 1: _mandar_resumen_grande volvía a filtrar
+        `lote` por la categoría CRUDA (c["categoria"]), así que un correo
+        con categoria="RUIDO" y categoria_jp="NATALIA" -exactamente lo
+        que deja rever_ruido()- no entraba en mios_l ni en derivar_l, no
+        aparecía en ningún mensaje, y cambiar_lote() lo marcaba
+        "en_resumen" como si JP lo hubiera visto. Ningún test cruzaba
+        antes "corregido por Rever" con "camino grande".
+
+        Base propia -no la de 40 TUYO del setUp-, y pocos TUYO a
+        propósito: _empacar_accionable arma `accionable = mios +
+        derivar`, así que TODOS los "TUYO" preceden al corregido
+        (categoría efectiva NATALIA) sin importar en qué orden se
+        anotaron -si hubiera 40 TUYO como en el resto de esta clase, el
+        corregido caería en `sobran` -que sí se cuenta pero no se manda
+        como texto- y el test no distinguiría "cayó en sobran" de "el
+        bug volvió"."""
+        f = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        s = secretaria.Secretaria(cx=memoria.abrir(f.name))
+        memoria.anotar(s.cx, correo_falso("<corregido@x>", "Cobros SiPago"),
+                       "RUIDO", "parecía promo")
+        memoria.corregir(s.cx, "<corregido@x>", "NATALIA",
+                         "SiPago es mi proveedor de cobros")
+        memoria.cambiar(s.cx, "<corregido@x>", "clasificado")
+        for i in range(3):
+            memoria.anotar(s.cx, correo_falso(f"<m{i}@x>", f"Mío {i}"),
+                           "TUYO", "m")
+
+        enviados = []
+
+        def enviar_falso(texto, teclado=None):
+            enviados.append(texto)
+            return {"ok": True}
+
+        with mock.patch.object(secretaria, "LIMITE_TELEGRAM", 300), \
+             mock.patch.object(s, "enviar", side_effect=enviar_falso):
+            s.mandar_resumen("manana")
+
+        texto_junto = "\n".join(enviados)
+        self.assertIn("Cobros SiPago", texto_junto,
+                      "el corregido por Rever no apareció en ningún mensaje")
+        self.assertIn("Natalia", texto_junto)
+        self.assertEqual(memoria.situacion(s.cx, "<corregido@x>"),
+                         "en_resumen")
+
 
 class LaAndanadaDeLaRonda2(unittest.TestCase):
     """Los números tal cual los midió el revisor: 1000 correos, 70 de

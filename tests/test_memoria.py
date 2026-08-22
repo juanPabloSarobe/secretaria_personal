@@ -135,12 +135,26 @@ class Correcciones(unittest.TestCase):
         memoria.corregir(self.cx, "<a@b.com>", "NATALIA",
                          "SiPago es mi proveedor de cobros")
         fila = self.cx.execute(
-            "SELECT categoria, categoria_jp, explicacion, situacion "
+            "SELECT categoria, categoria_jp, explicacion "
             "FROM correos WHERE message_id = ?", ("<a@b.com>",)).fetchone()
         self.assertEqual(fila["categoria"], "RUIDO")
         self.assertEqual(fila["categoria_jp"], "NATALIA")
         self.assertIn("cobros", fila["explicacion"])
-        self.assertEqual(fila["situacion"], "corregido")
+
+    def test_corregir_no_toca_la_situacion(self):
+        """Ronda de arreglo 1 de la tarea 10: corregir() ponía
+        situacion='corregido' por su cuenta, y su único llamador
+        (rever_ruido, en secretaria.py) lo pisaba en la línea siguiente
+        SIEMPRE -con "clasificado" o "mostrado_sin_clasificar", según la
+        categoría nueva-, así que ese valor nunca era observable desde
+        ningún lado. Ahora corregir() sólo guarda categoria_jp y
+        explicacion; decidir la situación que corresponde es trabajo de
+        quien llama, que tiene el contexto para saberlo."""
+        memoria.corregir(self.cx, "<a@b.com>", "NATALIA",
+                         "SiPago es mi proveedor de cobros")
+        # Sigue como la dejó memoria.anotar() en el setUp: "clasificado".
+        self.assertEqual(memoria.situacion(self.cx, "<a@b.com>"),
+                         "clasificado")
 
 
 class Obtener(unittest.TestCase):

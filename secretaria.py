@@ -797,8 +797,19 @@ class Secretaria:
         lotes, sobran = self._empacar_accionable(accionable, cupo_detalle)
 
         for n, lote in enumerate(lotes, 1):
-            mios_l = [c for c in lote if c["categoria"] == "TUYO"]
-            derivar_l = [c for c in lote if c["categoria"] in ("ENZO", "NATALIA")]
+            # `lote` sale de `mios`/`derivar` (que mandar_resumen ya armó
+            # con _categoria_de_resumen), pero filtrarlo de nuevo por la
+            # categoría cruda del sistema volvía a perder los corregidos
+            # por Rever: un correo con categoria="RUIDO" y
+            # categoria_jp="NATALIA" no es "TUYO" ni está en ("ENZO",
+            # "NATALIA") por su categoria cruda, así que no entraba en
+            # ninguna de las dos líneas -desaparecía del mensaje- y
+            # cambiar_lote() lo marcaba "en_resumen" igual, como si JP lo
+            # hubiera visto. Mismo criterio que en todos los demás
+            # filtros de este archivo: _categoria_de_resumen.
+            mios_l = [c for c in lote if _categoria_de_resumen(c) == "TUYO"]
+            derivar_l = [c for c in lote
+                        if _categoria_de_resumen(c) in ("ENZO", "NATALIA")]
             cabecera = [f"{self.SALUDO[momento]} Volviste con "
                        f"{len(accionable)} correos tuyos o para derivar "
                        f"esperando (parte {n}/{len(lotes) + 1})."]
