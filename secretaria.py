@@ -210,16 +210,29 @@ class Secretaria:
     def _terminar_de_archivar(self, c):
         """Reintenta SÓLO el borrado del original, sin volver a copiar.
 
-        Es el reintento del caso a medias: la copia ya está en Ruido. Que
-        correo.borrar_el_original() devuelva False -el mensaje ya no está
-        en INBOX- también termina el trabajo: la copia está en Ruido y
-        INBOX quedó limpio, que es todo lo que se quería.
+        Es el reintento del caso a medias: la copia ya está en Ruido.
+
+        Lo que devuelve borrar_el_original() se mira, y hasta la ronda 7
+        no se miraba: se marcaba "archivado" pasara lo que pasara. Si el
+        borrado no encontraba el original -por ejemplo porque un SEARCH
+        rechazado se leía como "ya no está"- el correo quedaba duplicado,
+        en INBOX y en Ruido, con la base diciendo que estaba archivado:
+        sin aviso, sin reintento y sin nadie que lo mirara. Ahora hay dos
+        finales y los dos son ciertos: True, se borró; False, el original
+        no estaba Y la copia sí -eso lo confirma borrar_el_original antes
+        de devolverlo-. Cualquier otra cosa sale por excepción.
         """
         if not self.puede_escribir():
             return
         try:
-            correo.borrar_el_original(c)
-            memoria.cambiar(self.cx, c["message_id"], "archivado")
+            if correo.borrar_el_original(c, "INBOX.Ruido"):
+                memoria.cambiar(self.cx, c["message_id"], "archivado")
+            else:
+                # El original ya no estaba y la copia está en Ruido: la
+                # mudanza terminó igual, sólo que el EXPUNGE que la
+                # terminó fue el de un intento anterior cuya respuesta se
+                # perdió.
+                memoria.cambiar(self.cx, c["message_id"], "archivado")
         except Exception as e:
             self._anotar_falla(c, e, "pendiente_de_borrar")
 
@@ -282,7 +295,18 @@ class Secretaria:
         Primero los pendientes y después los entrantes, para que un correo
         que falla recién ahora no se reintente dos veces en la misma
         vuelta y queme dos intentos de una.
+
+        Con el freno puesto no se hace nada de esto, tampoco el aviso.
+        Los reintentos ya lo respetaban -_archivar y _terminar_de_archivar
+        chequean puede_escribir()- pero el aviso se colaba: en seco o en
+        pausa la secretaria igual le escribía a JP "no pude archivar un
+        correo", que en seco es directamente falso (no lo intentó) y en
+        pausa es actuar cuando se le pidió que no actúe. Nada se pierde:
+        los pendientes siguen en la base y se retoman cuando el freno se
+        saca.
         """
+        if not self.puede_escribir():
+            return
         for situacion, seguir in (("pendiente_de_borrar",
                                    self._terminar_de_archivar),
                                   ("pendiente_de_archivar", self._archivar)):

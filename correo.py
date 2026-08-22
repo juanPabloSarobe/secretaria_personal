@@ -80,6 +80,21 @@ class IdentidadIncierta(Exception):
     """
 
 
+class CorreoPerdido(Exception):
+    """No está en INBOX y tampoco en el destino: no está en ningún lado.
+
+    Es la única cosa que este sistema no puede permitirse, así que cuando
+    aparece no se sigue como si nada: se levanta, se reintenta, y si
+    persiste JP se entera. Un correo duplicado es feo y se arregla con un
+    toque; uno perdido no se deshace.
+
+    En condiciones normales es imposible -el borrado del original es
+    siempre el último paso, después de que la copia está confirmada- y
+    por eso mismo, si pasa, algo que creemos no es cierto: alguien movió
+    cosas a mano, o el mensaje no era el que pensábamos.
+    """
+
+
 class UidsVencidos(IdentidadIncierta):
     """El UIDVALIDITY de la carpeta cambió: los UID guardados no valen.
 
@@ -326,6 +341,15 @@ def completar_adjuntos(correos):
 CABECERAS_DE_IDENTIDAD = ("(BODY.PEEK[HEADER.FIELDS"
                           " (MESSAGE-ID FROM SUBJECT DATE)])")
 
+# Cuántos candidatos de una búsqueda se confirman de a uno antes de
+# rendirse. Cada uno cuesta un FETCH de cabeceras, así que el número
+# acota el trabajo; lo que NO hace es acotarlo en silencio -pasado el
+# tope se levanta IdentidadIncierta, que reintenta y termina avisándole a
+# JP-. Doscientos es holgado para el criterio que se usa (un remitente,
+# una ventana de tres días) y sigue siendo un par de segundos en el peor
+# caso.
+TOPE_CANDIDATOS = 200
+
 
 def uidvalidity(M):
     """El UIDVALIDITY de la carpeta seleccionada, o None si no se sabe.
@@ -380,6 +404,8 @@ def _es_el_mismo(M, uid, esperada):
     Devuelve True (es ése), False (hay un mensaje pero es OTRO) o None (no
     hay ningún mensaje con ese UID). Los tres casos son distintos y hacen
     falta los tres: "es otro" obliga a no escribir, "no está" es benigno.
+    Un cuarto caso -el servidor rechazó el FETCH- no es ninguno de esos y
+    sale por IdentidadIncierta: no se pudo averiguar.
 
     Se compara recalculando `identidad()` sobre las cabeceras que devuelve
     el servidor, no sólo el Message-ID: así también se confirman los
@@ -388,7 +414,15 @@ def _es_el_mismo(M, uid, esperada):
     """
     typ, d = M.uid("FETCH", uid, CABECERAS_DE_IDENTIDAD)
     if typ != "OK":
-        return None
+        # El servidor rechazó el FETCH. Eso NO es "no hay ningún mensaje
+        # con ese UID": es que no se pudo averiguar, y las dos cosas
+        # tienen respuestas opuestas -una es benigna y la otra obliga a
+        # no escribir y a reintentar-. Confundirlas es la misma falla que
+        # se cerró en la ronda 5 para el COPY, mudada al lado de la
+        # lectura.
+        raise IdentidadIncierta(
+            f"{esperada}: el servidor rechazó leer las cabeceras del UID"
+            f" {uid!r} -- {_motivo(d)}")
     for parte in (d or []):
         if isinstance(parte, tuple) and len(parte) > 1 and parte[1]:
             msg = email.message_from_bytes(parte[1],
@@ -432,37 +466,61 @@ def _buscar_por_identidad(M, c):
     carpeta (el UID de INBOX no significa nada en INBOX.Ruido) o cuando el
     UID guardado ya no apunta a lo que apuntaba.
 
-    Con Message-ID alcanza el SEARCH por cabecera: si el servidor lo
-    encontró por esa cabecera, es ése. Sin Message-ID hay que acotar por
-    remitente y fecha y después confirmar cada candidato recalculando la
-    identidad sobre sus cabeceras -sin esa confirmación no se escribe.
+    El SEARCH sólo ACOTA; quien decide es la confirmación cabecera por
+    cabecera, para los dos criterios. Con el Message-ID también, y esto
+    último no es prolijidad: `SEARCH HEADER` compara por SUBCADENA (RFC
+    3501, "the string ... matches ... a substring of the header text"),
+    así que un Message-ID sin ángulos -"abc@def"- lo matchea el
+    "<xabc@def>" de otro correo. Devolver ese candidato sin confirmarlo
+    hacía que esta_en() dijera que la copia ya estaba en Ruido, que
+    mover_a saltara el COPY y que borrara el original: el correo
+    desaparecía de las dos carpetas y la base lo anotaba archivado. Era el
+    único camino de escritura sin confirmar que quedaba.
+
+    Devuelve None sólo cuando el servidor contestó bien y el mensaje no
+    está. Todo lo demás -búsqueda rechazada, o más candidatos de los que
+    se pueden confirmar- sale por IdentidadIncierta: no encontrarlo y no
+    poder buscarlo se parecen mucho y significan cosas opuestas.
     """
     esperada = identidad(c)
     if not esperada.startswith("sha:"):
-        typ, d = M.uid("SEARCH", None, "HEADER", "Message-ID",
-                       f'"{esperada}"')
-        if typ != "OK" or not d or not d[0]:
-            return None
-        uids = d[0].split()
-        return uids[-1] if uids else None
+        criterio = ["HEADER", "Message-ID", f'"{esperada}"']
+    else:
+        criterio = _criterio_de_busqueda(c)
+        if not criterio:
+            # Ni Message-ID, ni remitente utilizable, ni fecha legible: no
+            # hay forma de preguntar por este correo sin recorrer la
+            # carpeta entera, y adivinar no es una opción cuando el paso
+            # siguiente borra algo.
+            raise IdentidadIncierta(
+                f"{esperada}: sin Message-ID, sin remitente y sin fecha"
+                " utilizables, no hay cómo ubicar el mensaje en el servidor")
 
-    criterio = _criterio_de_busqueda(c)
-    if not criterio:
-        # Ni Message-ID, ni remitente utilizable, ni fecha legible: no hay
-        # forma de preguntar por este correo sin recorrer la carpeta
-        # entera, y adivinar no es una opción cuando el paso siguiente
-        # borra algo.
-        raise IdentidadIncierta(
-            f"{esperada}: sin Message-ID, sin remitente y sin fecha"
-            " utilizables, no hay cómo ubicar el mensaje en el servidor")
     typ, d = M.uid("SEARCH", None, *criterio)
-    if typ != "OK" or not d or not d[0]:
+    if typ != "OK":
+        raise IdentidadIncierta(
+            f"{esperada}: el servidor rechazó la búsqueda -- {_motivo(d)}")
+    uids = d[0].split() if (d and d[0]) else []
+    if not uids:
+        # El servidor contestó bien y no hay ninguno. Con Message-ID esto
+        # es concluyente incluso siendo por subcadena: si el nuestro
+        # estuviera, su cabecera contendría la cadena y habría venido en
+        # la lista.
         return None
+    if len(uids) > TOPE_CANDIDATOS:
+        # Antes se miraban los primeros 60 y el resto se descartaba en
+        # silencio: con más de 60 correos del mismo remitente automático
+        # en la ventana -que es exactamente el perfil de lo que
+        # archivamos- el nuestro quedaba afuera y la respuesta era "no
+        # está". Descartar en silencio es lo que venimos cerrando hace
+        # siete rondas; si son demasiados para confirmarlos, se dice.
+        raise IdentidadIncierta(
+            f"{esperada}: la búsqueda devolvió {len(uids)} candidatos, más"
+            f" de los {TOPE_CANDIDATOS} que se pueden confirmar de a uno;"
+            " no se toca ninguno")
     # De atrás para adelante: el más nuevo primero, que es el que casi
-    # siempre buscamos. El tope es un resguardo contra una carpeta enorme,
-    # no un límite esperado: el criterio ya acota a un remitente y a tres
-    # días.
-    for uid in list(reversed(d[0].split()))[:60]:
+    # siempre buscamos.
+    for uid in reversed(uids):
         if _es_el_mismo(M, uid, esperada):
             return uid
     return None
@@ -599,7 +657,7 @@ def mover_a(c, carpeta):
         M.logout()
 
 
-def borrar_el_original(c):
+def borrar_el_original(c, carpeta="INBOX.Ruido"):
     """Saca de INBOX un correo que YA está copiado en otra carpeta.
 
     Es la mitad que falta cuando mover_a() levanta OperacionAMedias: el
@@ -611,19 +669,28 @@ def borrar_el_original(c):
     varias copias por hora. Esta función no hace COPY nunca: por eso
     existe separada en vez de un parámetro de mover_a().
 
-    Devuelve True si borró, y False si el mensaje ya no está en INBOX
+    Devuelve True si borró, y False si el original ya no está en INBOX
     -el EXPUNGE anterior sí había salido y la respuesta se perdió, o JP
-    lo borró a mano-: en los dos casos el estado final es el que se
-    quería y no hay nada más que hacer. Si el STORE o el EXPUNGE
-    vuelven NO, sigue a medias y levanta OperacionAMedias, igual que
-    mover_a: el estado no cambió y el reintento es el mismo.
+    lo borró a mano-. Ese False dice "la mudanza terminó", y quien llama
+    lo usa para marcar el correo como archivado, así que antes de
+    devolverlo se CONFIRMA que la copia esté en `carpeta`: si no está en
+    ninguna de las dos, el correo no está en ningún lado y eso se levanta
+    como CorreoPerdido en vez de anotarse como resuelto.
+
+    Si el STORE o el EXPUNGE vuelven NO, sigue a medias y levanta
+    OperacionAMedias, igual que mover_a: el estado no cambió y el
+    reintento es el mismo.
     """
+    quien = identidad(c)
     M = abrir_buzon(readonly=False)
     try:
         uid = _ubicar_en_inbox(M, c)
         if not uid:
-            return False
-        return _sacar_de_inbox(M, uid, identidad(c), "el destino")
+            if esta_en(M, carpeta, c):
+                return False
+            raise CorreoPerdido(
+                f"{quien}: no está en INBOX y tampoco en {carpeta}")
+        return _sacar_de_inbox(M, uid, quien, carpeta)
     finally:
         M.logout()
 

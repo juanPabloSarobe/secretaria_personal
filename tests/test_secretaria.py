@@ -1227,6 +1227,40 @@ class ContraElServidorConEstado(unittest.TestCase):
                          "archivado")
         enviar.assert_not_called()
 
+    def test_un_message_id_por_subcadena_no_pierde_el_correo(self):
+        """El CRÍTICO de la ronda 7, de punta a punta: con un Message-ID
+        sin ángulos y otro correo que lo contiene, el ciclo borraba el
+        original de INBOX creyendo que la copia ya estaba en Ruido.
+        Medido antes: INBOX=[], RUIDO=['<xabc@def>'], situación
+        archivado, 0 avisos -- el correo desaparecido de las dos
+        carpetas y la base diciendo que estaba todo bien."""
+        buzon = BuzonFalso()
+        mio = buzon.agregar("INBOX", de="promo@ejemplo.com", asunto="Promo",
+                            fecha=hace(0), message_id="abc@def")
+        buzon.agregar("INBOX.Ruido", de="otro@ejemplo.com", asunto="Otra",
+                      fecha=hace(0), message_id="<xabc@def>")
+        c = correo_de(mio)
+        self._ciclos(buzon, [c], 3)
+        self.assertIn("abc@def",
+                      [m.message_id for m in buzon.carpetas["INBOX.Ruido"]])
+        self.assertEqual(memoria.situacion(self.s.cx, "abc@def"), "archivado")
+
+    def test_una_lectura_rechazada_termina_en_aviso_y_no_en_silencio(self):
+        """IMPORTANTE 1: antes esto quedaba en "clasificado" con 0
+        intentos y 0 avisos -- el correo en la bandeja y nadie enterado."""
+        buzon = BuzonFalso()
+        m = buzon.agregar("INBOX", de="no-reply@x.com", asunto="Resumen",
+                          fecha=hace(0), message_id="")
+        c = correo_de(m)
+        c["uid"] = "999"                    # el UID guardado no sirve
+        buzon.defecto["SEARCH"] = "NO"
+        enviar = self._ciclos(buzon, [c], 10)
+        self.assertEqual(buzon.cuenta("INBOX"), 1)
+        self.assertEqual(memoria.situacion(self.s.cx, correo.identidad(c)),
+                         "no_se_pudo_archivar")
+        self.assertEqual(enviar.call_count, 1)
+        self.assertIn("IdentidadIncierta", enviar.call_args[0][0])
+
     def test_si_cambio_el_uidvalidity_no_archiva_a_ciegas_y_avisa(self):
         """Los UID guardados dejaron de valer. Lo que no puede pasar es
         que se toque el mensaje equivocado; lo segundo que no puede pasar
@@ -1242,6 +1276,215 @@ class ContraElServidorConEstado(unittest.TestCase):
                          "no_se_pudo_archivar")
         self.assertEqual(enviar.call_count, 1)
         self.assertIn("UidsVencidos", enviar.call_args[0][0])
+
+
+
+class ElBorradoQueNoBorro(unittest.TestCase):
+    """IMPORTANTE 2 de la ronda 7: _terminar_de_archivar marcaba
+    "archivado" pase lo que pase, sin mirar lo que devolvía
+    borrar_el_original. Si el original no se podía ubicar y seguía en
+    INBOX, quedaba un duplicado permanente que la base llamaba archivado:
+    sin aviso y sin reintento. Es determinista, y explicaba los 247 de
+    3.000 duplicados silenciosos del fuzzing."""
+
+    def setUp(self):
+        self.f = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.s = secretaria.Secretaria(cx=memoria.abrir(self.f.name))
+
+    def _a_medias(self, buzon, mid="<med@x>"):
+        """Deja el correo en pendiente_de_borrar: copiado en Ruido y
+        todavía en INBOX."""
+        m = buzon.agregar("INBOX", de="promo@ejemplo.com", asunto="Promo",
+                          fecha=hace(0), message_id=mid)
+        buzon.agregar("INBOX.Ruido", de="promo@ejemplo.com", asunto="Promo",
+                      fecha=hace(0), message_id=mid)
+        c = correo_de(m)
+        c["message_id"] = mid
+        memoria.anotar(self.s.cx, c, "RUIDO", "promo")
+        memoria.cambiar(self.s.cx, mid, "pendiente_de_borrar")
+        return c
+
+    def _ciclos(self, buzon, vueltas):
+        with mock.patch.object(secretaria, "EN_SECO", False), \
+             mock.patch.object(secretaria.correo, "abrir_buzon",
+                               return_value=buzon), \
+             mock.patch.object(secretaria.correo, "traer_nuevos",
+                               return_value=[]), \
+             mock.patch.object(self.s, "enviar") as enviar:
+            for _ in range(vueltas):
+                self.s.revisar_casilla()
+        return enviar
+
+    def test_si_no_se_pudo_ubicar_el_original_no_dice_archivado(self):
+        buzon = BuzonFalso()
+        self._a_medias(buzon)
+        buzon.defecto["FETCH"] = "NO"
+        buzon.defecto["SEARCH"] = "NO"
+        enviar = self._ciclos(buzon, secretaria.INTENTOS_MAXIMOS + 2)
+        self.assertEqual(buzon.cuenta("INBOX"), 1, "sigue duplicado")
+        self.assertEqual(memoria.situacion(self.s.cx, "<med@x>"),
+                         "no_se_pudo_archivar")
+        self.assertEqual(enviar.call_count, 1)
+        self.assertIn("duplicado", enviar.call_args[0][0])
+
+    def test_si_el_original_ya_no_estaba_termina_archivado(self):
+        """El caso benigno no cambió: el EXPUNGE anterior sí había salido
+        y la respuesta se perdió. La copia está en Ruido, INBOX quedó
+        limpio, y eso es todo lo que se quería."""
+        buzon = BuzonFalso()
+        c = self._a_medias(buzon)
+        buzon.carpetas["INBOX"] = []          # el borrado ya había salido
+        enviar = self._ciclos(buzon, 2)
+        self.assertEqual(memoria.situacion(self.s.cx, "<med@x>"),
+                         "archivado")
+        enviar.assert_not_called()
+
+    def test_si_no_esta_en_ninguna_de_las_dos_carpetas_avisa(self):
+        """Y si tampoco está la copia, el correo no está en ningún lado:
+        eso no se anota como archivado, se cuenta."""
+        buzon = BuzonFalso()
+        self._a_medias(buzon)
+        buzon.carpetas["INBOX"] = []
+        buzon.carpetas["INBOX.Ruido"] = []
+        enviar = self._ciclos(buzon, secretaria.INTENTOS_MAXIMOS + 2)
+        self.assertEqual(memoria.situacion(self.s.cx, "<med@x>"),
+                         "no_se_pudo_archivar")
+        self.assertEqual(enviar.call_count, 1)
+        self.assertIn("CorreoPerdido", enviar.call_args[0][0])
+
+
+class ElFrenoTambienFrenaLosAvisos(unittest.TestCase):
+    """MENOR de la ronda 7: con EN_SECO o en pausa, _atender_pendientes
+    igual le escribía a JP "no pude archivar un correo". En seco es
+    directamente falso -no lo intentó- y en pausa es actuar cuando se le
+    pidió que no actúe."""
+
+    def setUp(self):
+        self.f = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.s = secretaria.Secretaria(cx=memoria.abrir(self.f.name))
+        c = correo_falso("<fre@x>", "Promo")
+        memoria.anotar(self.s.cx, c, "RUIDO", "promo")
+        memoria.anotar_falla(self.s.cx, "<fre@x>", "RuntimeError: red caída")
+        memoria.cambiar(self.s.cx, "<fre@x>", "pendiente_de_archivar")
+        for _ in range(secretaria.INTENTOS_MAXIMOS):
+            memoria.sumar_intento(self.s.cx, "<fre@x>")
+
+    def _ciclos(self, vueltas, en_seco=False, pausada=False):
+        self.s.pausada = pausada
+        with mock.patch.object(secretaria, "EN_SECO", en_seco), \
+             mock.patch.object(secretaria.correo, "traer_nuevos",
+                               return_value=[]), \
+             mock.patch.object(self.s, "enviar") as enviar:
+            for _ in range(vueltas):
+                self.s.revisar_casilla()
+        return enviar
+
+    def test_en_pausa_no_manda_avisos(self):
+        self._ciclos(5, pausada=True).assert_not_called()
+
+    def test_en_seco_tampoco(self):
+        self._ciclos(5, en_seco=True).assert_not_called()
+
+    def test_y_cuando_se_saca_el_freno_el_aviso_sale(self):
+        """Nada se pierde: el pendiente sigue en la base."""
+        self._ciclos(5, pausada=True).assert_not_called()
+        enviar = self._ciclos(2)
+        self.assertEqual(enviar.call_count, 1)
+        self.assertEqual(memoria.situacion(self.s.cx, "<fre@x>"),
+                         "no_se_pudo_archivar")
+
+
+class NuncaSeAbandonaEnSilencio(unittest.TestCase):
+    """La tercera propiedad, la que faltaba.
+
+    El test de fuerza bruta de la ronda 6 probaba que ningún correo se
+    pierde y que ninguno se duplica, pero no que ninguno quede
+    abandonado. Por ese hueco pasaron los dos hallazgos Importantes de la
+    ronda 7: un SEARCH o un FETCH rechazado se leía como "el correo ya no
+    está", el correo se quedaba en la bandeja con la base diciendo
+    "clasificado" -o peor, "archivado"- y nadie se enteraba nunca.
+
+    La propiedad, dicha entera: **después de que se agotan los intentos,
+    o funcionó o alguien se enteró**. No hay tercera opción. Y si la base
+    dice "archivado", la casilla tiene que estar de acuerdo."""
+
+    FALLAS = ("NO", "RED", "RED_DESPUES")
+    COMANDOS = ("SEARCH", "FETCH", "COPY", "STORE", "EXPUNGE")
+
+    def _una_corrida(self, comando, falla, con_mid):
+        f = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        s = secretaria.Secretaria(cx=memoria.abrir(f.name))
+        buzon = BuzonFalso()
+        m = buzon.agregar("INBOX", de="promo@ejemplo.com", asunto="Promo",
+                          fecha=hace(0),
+                          message_id="<fuzz@x>" if con_mid else "")
+        c = correo_de(m)
+        buzon.defecto[comando] = falla          # falla SIEMPRE
+        with mock.patch.object(secretaria, "EN_SECO", False), \
+             mock.patch.object(secretaria.correo, "abrir_buzon",
+                               return_value=buzon), \
+             mock.patch.object(secretaria.correo, "traer_nuevos",
+                               return_value=[c]), \
+             mock.patch.object(secretaria.clasificador, "clasificar",
+                               return_value={"categoria": "RUIDO",
+                                             "motivo": "promo",
+                                             "unanime": True}), \
+             mock.patch.object(s, "enviar") as enviar:
+            for _ in range(secretaria.INTENTOS_MAXIMOS + 3):
+                s.revisar_casilla()
+        sit = memoria.situacion(s.cx, correo.identidad(c))
+        s.cx.close()
+        return buzon, sit, enviar.call_count
+
+    def test_o_funciono_o_alguien_se_entero(self):
+        casos = 0
+        for comando in self.COMANDOS:
+            for falla in self.FALLAS:
+                for con_mid in (True, False):
+                    casos += 1
+                    buzon, sit, avisos = self._una_corrida(
+                        comando, falla, con_mid)
+                    archivado = (buzon.cuenta("INBOX.Ruido") == 1
+                                 and buzon.cuenta("INBOX") == 0)
+                    donde = (f"{comando}={falla},"
+                             f" {'con' if con_mid else 'sin'} Message-ID:"
+                             f" situación={sit}, avisos={avisos},"
+                             f" INBOX={buzon.cuenta('INBOX')},"
+                             f" RUIDO={buzon.cuenta('INBOX.Ruido')}")
+                    self.assertTrue(archivado or avisos >= 1,
+                                    "abandonado en silencio -- " + donde)
+        self.assertEqual(casos, 30)
+
+    def test_si_la_base_dice_archivado_la_casilla_esta_de_acuerdo(self):
+        """La otra mitad: que el estado no mienta. "archivado" tiene que
+        significar que está en Ruido y que no está más en la bandeja."""
+        for comando in self.COMANDOS:
+            for falla in self.FALLAS:
+                for con_mid in (True, False):
+                    buzon, sit, avisos = self._una_corrida(
+                        comando, falla, con_mid)
+                    if sit == "archivado":
+                        donde = (f"{comando}={falla}: la base dice"
+                                 f" archivado pero INBOX="
+                                 f"{buzon.cuenta('INBOX')} y RUIDO="
+                                 f"{buzon.cuenta('INBOX.Ruido')}")
+                        self.assertEqual(buzon.cuenta("INBOX"), 0, donde)
+                        self.assertEqual(buzon.cuenta("INBOX.Ruido"), 1,
+                                         donde)
+
+    def test_ninguna_falla_termina_en_clasificado(self):
+        """"clasificado" significa "está bien así, no hay nada que
+        hacer": es el estado en el que quedaban los correos abandonados.
+        Ninguna falla del servidor puede terminar ahí."""
+        for comando in self.COMANDOS:
+            for falla in self.FALLAS:
+                for con_mid in (True, False):
+                    _, sit, _ = self._una_corrida(comando, falla, con_mid)
+                    self.assertNotEqual(
+                        sit, "clasificado",
+                        f"{comando}={falla},"
+                        f" {'con' if con_mid else 'sin'} Message-ID,"
+                        " terminó en clasificado: nadie lo vuelve a mirar")
 
 
 

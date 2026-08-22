@@ -2,7 +2,7 @@ import email.utils
 import os
 import unittest
 import unittest.mock as mock
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import correo
 from tests.buzon_falso import BuzonFalso, Mensaje, correo_de, hace
@@ -387,6 +387,99 @@ class SeConfirmaAntesDeEscribir(unittest.TestCase):
                          ["<ajeno@x>"])
         self.assertEqual(buzon.cuenta("INBOX.Ruido"), 1)
 
+    def test_un_message_id_sin_angulos_no_agarra_el_de_al_lado(self):
+        """`SEARCH HEADER` compara por SUBCADENA (RFC 3501): un
+        Message-ID sin ángulos -"abc@def"- lo matchea el "<xabc@def>" de
+        otro correo. Devolver ese candidato sin confirmarlo era el último
+        camino de escritura sin confirmar que quedaba, y perdía correo:
+        esta_en() decía que la copia ya estaba en Ruido, mover_a salteaba
+        el COPY y borraba el original. El correo desaparecía de las dos
+        carpetas y la base lo anotaba archivado."""
+        buzon = BuzonFalso()
+        mio = buzon.agregar("INBOX", de="promo@ejemplo.com", asunto="Promo",
+                            fecha=hace(0), message_id="abc@def")
+        buzon.agregar("INBOX.Ruido", de="otro@ejemplo.com", asunto="Otra",
+                      fecha=hace(0), message_id="<xabc@def>")
+        with mock.patch.object(correo, "abrir_buzon", return_value=buzon):
+            self.assertTrue(correo.mover_a(correo_de(mio), "INBOX.Ruido"))
+        # Se copió de verdad: no se salteó el COPY creyendo que ya estaba.
+        self.assertEqual(len(buzon.de_comando("COPY")), 1)
+        self.assertIn("abc@def",
+                      [m.message_id for m in buzon.carpetas["INBOX.Ruido"]])
+        self.assertEqual(buzon.cuenta("INBOX"), 0)
+
+    def test_el_de_al_lado_no_se_toca(self):
+        """Y el correo ajeno que matcheó por subcadena sigue donde
+        estaba, sin marcas nuevas."""
+        buzon = BuzonFalso()
+        mio = buzon.agregar("INBOX", asunto="Promo", fecha=hace(0),
+                            message_id="abc@def")
+        ajeno = buzon.agregar("INBOX", de="cliente@importante.com",
+                              asunto="Contrato", fecha=hace(0),
+                              message_id="<xabc@def>")
+        with mock.patch.object(correo, "abrir_buzon", return_value=buzon):
+            correo.mover_a(correo_de(mio), "INBOX.Ruido")
+        self.assertEqual([m.message_id for m in buzon.carpetas["INBOX"]],
+                         ["<xabc@def>"])
+        self.assertEqual(ajeno.flags, set())
+
+    def test_una_busqueda_rechazada_no_es_un_correo_que_no_esta(self):
+        """No encontrarlo y no poder buscarlo significan cosas opuestas:
+        el primero es benigno y el segundo obliga a reintentar y, si no
+        se arregla, a avisar. Mapear los dos al mismo None dejaba el
+        correo marcado como resuelto, en la bandeja y sin que nadie se
+        enterara -- la misma falla que se cerró para el COPY en la ronda
+        5, mudada al lado de la lectura."""
+        buzon = BuzonFalso()
+        m = buzon.agregar("INBOX", message_id="<uno@x>", fecha=hace(0))
+        c = correo_de(m, con_uid=False)
+        buzon.defecto["SEARCH"] = "NO"
+        with mock.patch.object(correo, "abrir_buzon", return_value=buzon):
+            with self.assertRaises(correo.IdentidadIncierta):
+                correo.mover_a(c, "INBOX.Ruido")
+        self.assertEqual(buzon.cuenta("INBOX"), 1)
+
+    def test_un_fetch_rechazado_tampoco(self):
+        """El FETCH es la confirmación; si el servidor lo rechaza no se
+        sabe si el mensaje es el nuestro, y eso no es "no está"."""
+        buzon = BuzonFalso()
+        m = buzon.agregar("INBOX", message_id="<dos@x>", fecha=hace(0))
+        buzon.defecto["FETCH"] = "NO"
+        with mock.patch.object(correo, "abrir_buzon", return_value=buzon):
+            with self.assertRaises(correo.IdentidadIncierta):
+                correo.mover_a(correo_de(m), "INBOX.Ruido")
+        self.assertEqual(buzon.cuenta("INBOX"), 1)
+
+    def test_muchos_candidatos_no_le_hacen_perder_el_rastro(self):
+        """Sin ninguna falla del servidor: un remitente automático que
+        manda mucho. Con el tope viejo de 60, el correo número 61 en el
+        orden de la búsqueda se descartaba y la respuesta era "no está":
+        70 candidatos fallaba y 50 andaba. Y un remitente que manda mucho
+        es exactamente lo que archivamos."""
+        buzon = BuzonFalso()
+        for i in range(70):
+            buzon.agregar("INBOX", de="no-reply@x.com", asunto=f"Aviso {i}",
+                          fecha=hace(0), message_id="")
+        mio = buzon.carpetas["INBOX"][0]        # el más viejo: el último
+        c = correo_de(mio, con_uid=False)       # una fila vieja, sin UID
+        with mock.patch.object(correo, "abrir_buzon", return_value=buzon):
+            self.assertTrue(correo.mover_a(c, "INBOX.Ruido"))
+        self.assertEqual(buzon.cuenta("INBOX.Ruido"), 1)
+        self.assertEqual(buzon.carpetas["INBOX.Ruido"][0].asunto, "Aviso 0")
+
+    def test_si_son_demasiados_para_confirmar_lo_dice(self):
+        """Pasado el tope no se descarta en silencio: se levanta
+        IdentidadIncierta, que reintenta y termina avisándole a JP."""
+        buzon = BuzonFalso()
+        for i in range(correo.TOPE_CANDIDATOS + 1):
+            buzon.agregar("INBOX", de="no-reply@x.com", asunto=f"Aviso {i}",
+                          fecha=hace(0), message_id="")
+        c = correo_de(buzon.carpetas["INBOX"][0], con_uid=False)
+        with mock.patch.object(correo, "abrir_buzon", return_value=buzon):
+            with self.assertRaises(correo.IdentidadIncierta):
+                correo.mover_a(c, "INBOX.Ruido")
+        self.assertEqual(buzon.cuenta("INBOX.Ruido"), 0)
+
     def test_si_cambio_el_uidvalidity_no_se_toca_nada(self):
         """UIDVALIDITY distinto significa que los UID se repartieron de
         nuevo: el 1043 de hoy puede ser cualquier otro correo. Eso hay que
@@ -536,12 +629,30 @@ class BorrarElOriginal(unittest.TestCase):
         """No es un fallo: el original ya no está donde se lo iba a borrar
         -el EXPUNGE anterior sí había salido y no nos enteramos, o JP lo
         borró a mano- y la copia sigue en Ruido. El estado final es el que
-        se quería."""
-        fake = _IMAPFalso(uid_buscado=None)
-        with mock.patch.object(correo, "abrir_buzon", return_value=fake):
-            ok = correo.borrar_el_original(un_correo("<no-existe@x>"))
+        se quería.
+
+        Que la copia esté en Ruido dejó de ser un supuesto: desde la ronda
+        7 se confirma antes de devolver False, porque quien llama lee ese
+        False como "archivado"."""
+        buzon = BuzonFalso()
+        buzon.agregar("INBOX.Ruido", message_id="<copiado@x>")
+        c = correo_de(buzon.carpetas["INBOX.Ruido"][0], con_uid=False)
+        with mock.patch.object(correo, "abrir_buzon", return_value=buzon):
+            ok = correo.borrar_el_original(c)
         self.assertFalse(ok)
-        self.assertEqual([c[0] for c in fake.comandos], ["FETCH", "SEARCH"])
+        self.assertEqual(buzon.cuenta("INBOX.Ruido"), 1)
+        self.assertNotIn("EXPUNGE", [x[0] for x in buzon.comandos])
+
+    def test_si_no_esta_en_ninguna_de_las_dos_carpetas_avisa(self):
+        """El False de arriba significa "archivado" para quien llama. Si
+        la copia tampoco está, el correo no está en ningún lado y anotarlo
+        como archivado sería la peor mentira posible de esta base."""
+        buzon = BuzonFalso()
+        c = correo_de(Mensaje(b"77", "promo@ejemplo.com", "Promo", FECHA,
+                              "<fantasma@x>"), con_uid=False)
+        with mock.patch.object(correo, "abrir_buzon", return_value=buzon):
+            with self.assertRaises(correo.CorreoPerdido):
+                correo.borrar_el_original(c)
 
     def test_si_el_store_no_confirma_sigue_a_medias(self):
         fake = _IMAPFalso(store_ok=False)
@@ -617,15 +728,20 @@ class DevolverABandeja(unittest.TestCase):
         with mock.patch.object(correo.imaplib, "IMAP4_SSL", return_value=fake):
             ok = correo.devolver_a_bandeja(un_correo("<r@x>"))
         self.assertTrue(ok)
+        # El FETCH después del SEARCH es la confirmación del candidato:
+        # `SEARCH HEADER` compara por subcadena, así que encontrar no es
+        # lo mismo que confirmar (ronda 7).
         self.assertEqual([c[0] for c in fake.comandos],
-                         ["SEARCH", "STORE", "COPY", "STORE", "EXPUNGE"])
+                         ["SEARCH", "FETCH", "STORE", "COPY", "STORE",
+                          "EXPUNGE"])
         self.assertEqual(fake.seleccionadas, ["INBOX.Ruido"])
         # el \Seen se saca ANTES del COPY -- así la copia nace sin leer,
         # sin depender de un segundo paso después de mover el mensaje.
-        primer_store = fake.comandos[1]
+        # (Se buscan por nombre y no por posición: la secuencia ganó un
+        # FETCH de confirmación en la ronda 7 y va a poder ganar otros.)
+        primer_store, segundo_store = fake.de_comando("STORE")
         self.assertIn("-FLAGS", primer_store)
         self.assertIn("(\\Seen)", primer_store)
-        segundo_store = fake.comandos[3]
         self.assertIn("+FLAGS", segundo_store)
         self.assertIn("(\\Deleted)", segundo_store)
 
@@ -658,7 +774,7 @@ class DevolverABandeja(unittest.TestCase):
             ok = correo.devolver_a_bandeja(un_correo("<r@x>"))
         self.assertFalse(ok)
         nombres = [c[0] for c in fake.comandos]
-        self.assertEqual(nombres, ["SEARCH", "STORE", "COPY"])
+        self.assertEqual(nombres, ["SEARCH", "FETCH", "STORE", "COPY"])
         self.assertNotIn("EXPUNGE", nombres)
         self.assertEqual(fake.cuenta("INBOX.Ruido"), 1)
 
@@ -686,7 +802,8 @@ class DevolverABandeja(unittest.TestCase):
         with mock.patch.object(correo.imaplib, "IMAP4_SSL", return_value=fake):
             ok = correo.devolver_a_bandeja(un_correo("<r@x>"))
         self.assertFalse(ok)
-        self.assertEqual([c[0] for c in fake.comandos], ["SEARCH", "STORE"])
+        self.assertEqual([c[0] for c in fake.comandos],
+                         ["SEARCH", "FETCH", "STORE"])
 
     def test_con_store_deleted_no_queda_a_medias(self):
         """El hermano del Crítico 1, acá también: con el COPY a INBOX ya
@@ -698,7 +815,8 @@ class DevolverABandeja(unittest.TestCase):
             with self.assertRaises(correo.OperacionAMedias):
                 correo.devolver_a_bandeja(un_correo("<r@x>"))
         nombres = [c[0] for c in fake.comandos]
-        self.assertEqual(nombres, ["SEARCH", "STORE", "COPY", "STORE"])
+        self.assertEqual(nombres,
+                         ["SEARCH", "FETCH", "STORE", "COPY", "STORE"])
         self.assertNotIn("EXPUNGE", nombres)
 
     def test_con_expunge_no_queda_a_medias(self):
@@ -708,7 +826,8 @@ class DevolverABandeja(unittest.TestCase):
             with self.assertRaises(correo.OperacionAMedias):
                 correo.devolver_a_bandeja(un_correo("<r@x>"))
         self.assertEqual([c[0] for c in fake.comandos],
-                         ["SEARCH", "STORE", "COPY", "STORE", "EXPUNGE"])
+                         ["SEARCH", "FETCH", "STORE", "COPY", "STORE",
+                          "EXPUNGE"])
 
 
 class ElUidvalidityNoSeLeeDosVeces(unittest.TestCase):
@@ -810,6 +929,100 @@ class NuncaSePierdeUnCorreo(unittest.TestCase):
                 self.assertLessEqual(
                     buzon.cuenta("INBOX.Ruido"), 1,
                     f"quedaron duplicados con {comando}={falla}")
+
+
+
+class TraerNuevos(unittest.TestCase):
+    """El origen de todo, y hasta la ronda 7 no tenía un solo test: en las
+    44 apariciones de `traer_nuevos` en la suite estaba simulado.
+
+    El auditor le sacó `uidvalidity=validez`, después `uid=uid.decode()`,
+    y la suite entera siguió pasando: los dos campos de los que depende
+    todo el mecanismo de ubicar-y-confirmar se podían desconectar en el
+    origen sin que nada fallara. Estos tests corren la función de verdad
+    contra el buzón falso."""
+
+    def _buzon(self):
+        buzon = BuzonFalso(uidvalidity="603289753")
+        buzon.agregar("INBOX", de="Promo <promo@ejemplo.com>",
+                      asunto="Oferta de agosto", fecha=hace(0),
+                      message_id="<uno@x>")
+        buzon.agregar("INBOX", de="no-reply@facturas.com",
+                      asunto="Tu resumen", fecha=hace(0), message_id="",
+                      flags=("\\Seen",))
+        return buzon
+
+    def _traer(self, buzon, dias=1):
+        with mock.patch.object(correo, "abrir_buzon", return_value=buzon):
+            return correo.traer_nuevos(date.today() - timedelta(days=dias))
+
+    def test_trae_el_uid_real_de_cada_correo(self):
+        """Sin el UID no hay forma de ubicar después un correo sin
+        Message-ID: es el único identificador que el servidor entiende."""
+        buzon = self._buzon()
+        traidos = self._traer(buzon)
+        self.assertEqual([c["uid"] for c in traidos],
+                         [m.uid.decode() for m in buzon.carpetas["INBOX"]])
+        for c in traidos:
+            self.assertTrue(c["uid"], "un correo vino sin UID")
+
+    def test_trae_el_uidvalidity_de_la_carpeta(self):
+        """Un UID sin su UIDVALIDITY es un número suelto: no se sabe hasta
+        cuándo significa algo."""
+        traidos = self._traer(self._buzon())
+        self.assertTrue(traidos)
+        for c in traidos:
+            self.assertEqual(c["uidvalidity"], "603289753")
+
+    def test_lo_que_trae_alcanza_para_volver_a_ubicar_el_correo(self):
+        """La prueba que de verdad importa: lo que sale de traer_nuevos
+        tiene que servirle a _ubicar_en_inbox, que es quien lo usa. Si
+        alguien desconecta el uid o el uidvalidity, esto falla."""
+        buzon = self._buzon()
+        traidos = self._traer(buzon)
+        for c, m in zip(traidos, buzon.carpetas["INBOX"]):
+            with mock.patch.object(correo, "abrir_buzon",
+                                   return_value=buzon):
+                M = correo.abrir_buzon(readonly=False)
+                self.assertEqual(correo._ubicar_en_inbox(M, c), m.uid)
+
+    def test_marca_cuales_venian_leidos(self):
+        """Si JP lo abrió del celular antes de que la secretaria lo mire,
+        no hay que interrumpirlo con algo que ya vio."""
+        traidos = self._traer(self._buzon())
+        self.assertEqual([c["ya_leido"] for c in traidos], [False, True])
+
+    def test_trae_las_cabeceras_y_el_cuerpo(self):
+        traidos = self._traer(self._buzon())
+        self.assertEqual(traidos[0]["asunto"], "Oferta de agosto")
+        self.assertEqual(traidos[0]["de"], "Promo <promo@ejemplo.com>")
+        self.assertEqual(traidos[0]["message_id"], "<uno@x>")
+        self.assertIn("cuerpo", traidos[0]["cuerpo"])
+        self.assertEqual(traidos[1]["message_id"], "")
+
+    def test_no_marca_como_leido_lo_que_no_lo_estaba(self):
+        """La regla del proyecto: BODY.PEEK[], nunca RFC822. Un FETCH
+        normal marca como leídos los mensajes que no lo estaban y eso no
+        se deshace cómodamente en la casilla real. El doble revienta si el
+        pedido no lleva PEEK, así que no hace falta creerle a nadie."""
+        buzon = self._buzon()
+        self._traer(buzon)
+        pedidos = [str(x[2]) for x in buzon.de_comando("FETCH")]
+        self.assertTrue(pedidos)
+        for pedido in pedidos:
+            self.assertIn("BODY.PEEK[]", pedido)
+            self.assertNotIn("RFC822", pedido)
+        for m in buzon.carpetas["INBOX"][:1]:
+            self.assertNotIn("\\Seen", m.flags)
+
+    def test_busca_desde_la_fecha_que_se_le_pide(self):
+        buzon = self._buzon()
+        buzon.agregar("INBOX", de="viejo@ejemplo.com", asunto="De la semana",
+                      fecha=hace(9), message_id="<viejo@x>")
+        traidos = self._traer(buzon, dias=1)
+        self.assertNotIn("<viejo@x>", [c["message_id"] for c in traidos])
+        self.assertIn("<viejo@x>",
+                      [c["message_id"] for c in self._traer(buzon, dias=30)])
 
 
 

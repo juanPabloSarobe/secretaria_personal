@@ -35,25 +35,44 @@ class PerdidaDeCorreo(AssertionError):
 
 
 class Mensaje:
-    def __init__(self, uid, de, asunto, fecha, message_id="", flags=()):
+    def __init__(self, uid, de, asunto, fecha, message_id="", flags=(),
+                 para="jp@fullcontrolgps.com.ar", cc="", cuerpo="cuerpo"):
         self.uid = uid if isinstance(uid, bytes) else str(uid).encode()
         self.de = de
         self.asunto = asunto
         self.fecha = fecha
         self.message_id = message_id
         self.flags = set(flags)
+        self.para = para
+        self.cc = cc
+        self.cuerpo = cuerpo
 
-    def cabeceras(self):
-        """Lo que devuelve un FETCH de HEADER.FIELDS, en bytes."""
+    def _lineas(self, todas):
         lineas = [f"From: {self.de}", f"Subject: {self.asunto}",
                   f"Date: {self.fecha}"]
         if self.message_id:
             lineas.append(f"Message-ID: {self.message_id}")
-        return ("\r\n".join(lineas) + "\r\n\r\n").encode("utf-8")
+        if todas:
+            lineas += [f"To: {self.para}"]
+            if self.cc:
+                lineas.append(f"Cc: {self.cc}")
+            lineas += ["MIME-Version: 1.0",
+                       'Content-Type: text/plain; charset="utf-8"']
+        return lineas
+
+    def cabeceras(self):
+        """Lo que devuelve un FETCH de HEADER.FIELDS, en bytes."""
+        return ("\r\n".join(self._lineas(False)) + "\r\n\r\n").encode("utf-8")
+
+    def completo(self):
+        """El mensaje entero, como lo devuelve un FETCH de BODY.PEEK[]."""
+        return ("\r\n".join(self._lineas(True)) + "\r\n\r\n"
+                + self.cuerpo).encode("utf-8")
 
     def copia(self, uid):
         return Mensaje(uid, self.de, self.asunto, self.fecha,
-                       self.message_id, self.flags)
+                       self.message_id, self.flags, self.para, self.cc,
+                       self.cuerpo)
 
 
 def _fecha_de(cabecera):
@@ -218,12 +237,26 @@ class BuzonFalso:
         if r != "OK":
             return ("NO", [None])
         uid = args[0] if isinstance(args[0], bytes) else str(args[0]).encode()
+        pedido = str(args[1]) if len(args) > 1 else ""
+        if "RFC822" in pedido or ("BODY[" in pedido and "PEEK" not in pedido):
+            # Un FETCH sin PEEK marca como leído lo que no lo estaba, y en
+            # la casilla de JP eso no se deshace cómodamente. El doble no
+            # lo simula: lo prohíbe.
+            raise AssertionError(
+                f"FETCH sin BODY.PEEK: marcaría como leído -- {pedido}")
         for m in self.carpetas[carpeta]:
             if m.uid == uid:
-                cuerpo = m.cabeceras()
-                return ("OK", [(uid + b" (BODY[HEADER.FIELDS (...)] {"
-                                + str(len(cuerpo)).encode() + b"}", cuerpo),
-                               b")"])
+                solo_cabeceras = "HEADER.FIELDS" in pedido
+                cuerpo = m.cabeceras() if solo_cabeceras else m.completo()
+                etiqueta = ("BODY[HEADER.FIELDS (...)]" if solo_cabeceras
+                            else "BODY[]")
+                prefijo = uid + b" ("
+                if "FLAGS" in pedido:
+                    prefijo += ("FLAGS (" + " ".join(sorted(m.flags))
+                                + ") ").encode()
+                prefijo += (etiqueta + " {").encode() + \
+                    str(len(cuerpo)).encode() + b"}"
+                return ("OK", [(prefijo, cuerpo), b")"])
         # Un FETCH sobre un UID que ya no existe: el servidor contesta OK
         # y no devuelve nada. Que eso no se confunda con "es otro mensaje"
         # es justamente lo que decide si se puede reintentar.
