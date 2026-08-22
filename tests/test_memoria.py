@@ -171,6 +171,52 @@ class BaseVieja(unittest.TestCase):
         cx.close()
         os.unlink(f.name)
 
+    def test_tambien_gana_las_columnas_de_la_ronda_6(self):
+        """`uidvalidity` -sin la que un UID guardado es un número suelto- y
+        `falla` -sin la que un aviso atrasado no puede decir qué pasó-.
+        Una fila que ya existía queda con las dos en NULL, que es lo
+        correcto: de esos correos no sabemos el UIDVALIDITY, y el código
+        que las lee lo contempla."""
+        import sqlite3
+        f = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        vieja = sqlite3.connect(f.name)
+        vieja.execute(
+            "CREATE TABLE correos (message_id TEXT PRIMARY KEY, uid TEXT,"
+            " de TEXT, para TEXT, cc TEXT, asunto TEXT, fecha TEXT,"
+            " cuerpo TEXT, adjuntos TEXT, categoria TEXT, motivo TEXT,"
+            " categoria_jp TEXT, explicacion TEXT, situacion TEXT NOT NULL,"
+            " visto TEXT NOT NULL, actualizado TEXT NOT NULL)")
+        vieja.execute(
+            "INSERT INTO correos (message_id, situacion, visto, actualizado)"
+            " VALUES ('<vieja@x>', 'clasificado', 'ayer', 'ayer')")
+        vieja.commit()
+        vieja.close()
+
+        cx = memoria.abrir(f.name)
+        columnas = {c["name"] for c in cx.execute("PRAGMA table_info(correos)")}
+        self.assertIn("uidvalidity", columnas)
+        self.assertIn("falla", columnas)
+        memoria.anotar_falla(cx, "<vieja@x>", "CopiaRechazada: cuota")
+        fila = cx.execute("SELECT falla, uidvalidity FROM correos WHERE"
+                          " message_id = '<vieja@x>'").fetchone()
+        self.assertEqual(fila["falla"], "CopiaRechazada: cuota")
+        self.assertIsNone(fila["uidvalidity"])
+        # y la fila vieja sigue estando: migrar no pierde nada
+        self.assertEqual(memoria.situacion(cx, "<vieja@x>"), "clasificado")
+        cx.close()
+        os.unlink(f.name)
+
+    def test_el_uidvalidity_se_guarda_junto_al_uid(self):
+        f = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        cx = memoria.abrir(f.name)
+        c = dict(un_correo(), uid="1043", uidvalidity="1755000000")
+        memoria.anotar(cx, c, "RUIDO", "promo")
+        fila = memoria.pendientes(cx, "clasificado")[0]
+        self.assertEqual(fila["uid"], "1043")
+        self.assertEqual(fila["uidvalidity"], "1755000000")
+        cx.close()
+        os.unlink(f.name)
+
 
 class Latido(unittest.TestCase):
     def test_sin_latidos_devuelve_none(self):

@@ -42,6 +42,11 @@ ESQUEMA = """
 CREATE TABLE IF NOT EXISTS correos (
     message_id   TEXT PRIMARY KEY,
     uid          TEXT,
+    -- El UID de IMAP sólo identifica un mensaje mientras el UIDVALIDITY
+    -- de la carpeta siga siendo el mismo. Guardar uno sin el otro es
+    -- guardar un número suelto: si la carpeta se recrea, ese UID puede
+    -- ser hoy cualquier otro correo. Van juntos por eso.
+    uidvalidity  TEXT,
     de           TEXT,
     para         TEXT,
     cc           TEXT,
@@ -56,7 +61,12 @@ CREATE TABLE IF NOT EXISTS correos (
     situacion    TEXT NOT NULL,
     visto        TEXT NOT NULL,
     actualizado  TEXT NOT NULL,
-    intentos     INTEGER NOT NULL DEFAULT 0
+    intentos     INTEGER NOT NULL DEFAULT 0,
+    -- Qué falló la última vez que se intentó archivarlo. Va en la base y
+    -- no en una variable porque el aviso a JP puede quedar pendiente
+    -- -Telegram caído- y tiene que poder mandarse después de un reinicio,
+    -- diciendo todavía qué fue lo que pasó.
+    falla        TEXT
 );
 CREATE INDEX IF NOT EXISTS por_situacion ON correos(situacion);
 CREATE TABLE IF NOT EXISTS latidos (momento TEXT PRIMARY KEY);
@@ -75,6 +85,13 @@ def abrir(ruta="datos/secretaria.db"):
         return cx
 
 
+# Columnas que el esquema ganó después de que la base ya existía, con la
+# definición exacta que hay que agregarle a una tabla vieja.
+AGREGADAS = [("intentos", "INTEGER NOT NULL DEFAULT 0"),
+             ("uidvalidity", "TEXT"),
+             ("falla", "TEXT")]
+
+
 def _migrar(cx):
     """Agrega a una base que ya existe las columnas que el esquema ganó
     después.
@@ -86,9 +103,9 @@ def _migrar(cx):
     idempotente a propósito: se ejecuta en cada `abrir()`.
     """
     columnas = {f["name"] for f in cx.execute("PRAGMA table_info(correos)")}
-    if "intentos" not in columnas:
-        cx.execute("ALTER TABLE correos ADD COLUMN intentos"
-                   " INTEGER NOT NULL DEFAULT 0")
+    for nombre, definicion in AGREGADAS:
+        if nombre not in columnas:
+            cx.execute(f"ALTER TABLE correos ADD COLUMN {nombre} {definicion}")
 
 
 def _ahora():
@@ -110,11 +127,13 @@ def anotar(cx, correo, categoria, motivo):
                else "clasificado")
     with _CANDADO:
         cur = cx.execute(
-            "INSERT INTO correos (message_id, uid, de, para, cc, asunto,"
-            " fecha, cuerpo, adjuntos, categoria, motivo, situacion, visto,"
-            " actualizado) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+            "INSERT INTO correos (message_id, uid, uidvalidity, de, para,"
+            " cc, asunto, fecha, cuerpo, adjuntos, categoria, motivo,"
+            " situacion, visto, actualizado)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
             " ON CONFLICT(message_id) DO NOTHING",
-            (correo["message_id"], correo.get("uid"), correo.get("de"),
+            (correo["message_id"], correo.get("uid"),
+             correo.get("uidvalidity"), correo.get("de"),
              correo.get("para"), correo.get("cc"), correo.get("asunto"),
              correo.get("fecha"), (correo.get("cuerpo") or "")[:8000],
              json.dumps(correo.get("adjuntos") or [], ensure_ascii=False),
@@ -157,6 +176,21 @@ def sumar_intento(cx, message_id):
         f = cx.execute("SELECT intentos FROM correos WHERE message_id = ?",
                        (message_id,)).fetchone()
     return f["intentos"] if f else 0
+
+
+def anotar_falla(cx, message_id, texto):
+    """Guarda qué falló al intentar archivar este correo.
+
+    Se guarda en la base y no en memoria del proceso porque el aviso a JP
+    puede no salir en el momento -si Telegram está caído queda pendiente-
+    y launchd reinicia esto cada vez que se cae: al volver hay que poder
+    contar todavía qué fue lo que pasó, no un "algo falló".
+    """
+    with _CANDADO:
+        cx.execute("UPDATE correos SET falla = ?, actualizado = ?"
+                   " WHERE message_id = ?", (texto[:500], _ahora(),
+                                             message_id))
+        cx.commit()
 
 
 def pendientes(cx, sit):

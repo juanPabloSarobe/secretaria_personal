@@ -1,13 +1,37 @@
 #!/usr/bin/env python3
 """Todo lo que habla con la casilla, y todo lo que interpreta un mensaje.
 
-Nadie más abre una conexión IMAP. Las dos reglas que no se negocian viven
-acá adentro: se lee con BODY.PEEK[] para no marcar como leído lo que no lo
-estaba, y se busca por Message-ID y nunca por número de secuencia, porque
-el número cambia en cuanto se archiva algo.
+Nadie más abre una conexión IMAP. Las reglas que no se negocian viven acá
+adentro:
+
+  - se lee con BODY.PEEK[] para no marcar como leído lo que no lo estaba;
+
+  - nunca se busca por número de secuencia: el número se corre en cuanto
+    se borra algo de la carpeta y para entonces apunta a otro correo;
+
+  - y nunca se escribe sobre un mensaje sin haber CONFIRMADO que es el
+    que creíamos. Ubicarlo y confirmarlo son dos cosas distintas y acá se
+    hacen por separado (_ubicar_en_inbox / _buscar_por_identidad para lo
+    primero, _es_el_mismo para lo segundo).
+
+Sobre esto último: durante mucho tiempo el único identificador que se usó
+contra el servidor fue el Message-ID, y eso dejaba afuera justo a los
+correos que más queremos archivar. `identidad()` inventa un `sha:...`
+cuando el mensaje no trae Message-ID —le sirve a la base para reconocer un
+correo entre corridas— pero ese hash NO existe del lado del servidor: un
+`SEARCH HEADER Message-ID "sha:..."` no encuentra nada nunca, y los
+remitentes automáticos, que son los que omiten el Message-ID, no se
+archivaban jamás. Son dos identificadores para dos cosas distintas y se
+habían mezclado en uno.
+
+El identificador que el servidor sí entiende es el UID, que `traer_nuevos`
+ya trae. Los UID no se corren como los números de secuencia: son estables
+mientras no cambie el UIDVALIDITY de la carpeta, y por eso se guarda
+también ese número junto al UID. Si cambió, los UID viejos no valen y hay
+que decirlo (UidsVencidos) en vez de tocar el mensaje equivocado.
 """
 import email, email.policy, email.utils, hashlib, html, imaplib, os, re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 
 class OperacionAMedias(Exception):
@@ -44,6 +68,31 @@ class CopiaRechazada(Exception):
     """
 
 
+class IdentidadIncierta(Exception):
+    """No se pudo confirmar que el mensaje sea el que creíamos.
+
+    No se tocó nada, y ésa es la única respuesta aceptable: escribir sobre
+    un mensaje sin confirmar cuál es puede archivar o borrar el correo de
+    otro. Como no se escribió nada, reintentar la operación entera más
+    adelante es seguro -y si el problema no se arregla, el tope de
+    intentos hace que JP se entere, que es exactamente lo que no pasaba
+    cuando esto devolvía False en silencio.
+    """
+
+
+class UidsVencidos(IdentidadIncierta):
+    """El UIDVALIDITY de la carpeta cambió: los UID guardados no valen.
+
+    Un UID identifica un mensaje sólo dentro de un UIDVALIDITY dado. Si el
+    servidor lo cambia -la carpeta se borró y se volvió a crear, una
+    restauración desde backup, una migración- los UID se reparten de nuevo
+    y el 1043 de hoy puede ser cualquier otro correo. Por eso no se
+    intenta "arreglarlo solo": se levanta esto, que llega hasta JP por el
+    camino de aviso que ya existe. Es raro y es grave; que lo mire una
+    persona es más barato que adivinar.
+    """
+
+
 def _motivo(respuesta):
     """El texto con el que el servidor rechazó un comando.
 
@@ -72,7 +121,7 @@ def abrir_buzon(readonly=True):
     M = imaplib.IMAP4_SSL(os.environ["IMAP_HOST"],
                           int(os.environ["IMAP_PORT"]), timeout=40)
     M.login(os.environ["IMAP_USER"], os.environ["IMAP_PASSWORD"])
-    M.select("INBOX", readonly=readonly)
+    seleccionar(M, "INBOX", readonly)
     return M
 
 
@@ -164,17 +213,42 @@ def texto_plano(msg):
 
 
 def identidad(c):
-    """Identificador estable de un correo.
+    """Identificador estable de un correo, del lado NUESTRO.
 
     El Message-ID es lo correcto, pero no todos los remitentes automáticos lo
     mandan. Sin una reserva, esos correos se preguntan una y otra vez en cada
     tanda. El resumen de remitente + asunto + fecha alcanza para reconocerlos.
+
+    Ojo con qué es y qué no es esto: sirve para reconocer un correo entre
+    corridas -es la clave de la base- y para CONFIRMAR que un mensaje del
+    servidor es el que creíamos, porque se puede recalcular sobre las
+    cabeceras que devuelve un FETCH. Lo que no es, es algo que el servidor
+    entienda: un `sha:...` no se puede buscar. Para ubicar un mensaje están
+    el UID y _buscar_por_identidad().
     """
     mid = (c.get("message_id") or "").strip()
     if mid:
         return mid
     semilla = f"{c.get('de','')}|{c.get('asunto','')}|{c.get('fecha','')}"
     return "sha:" + hashlib.sha256(semilla.encode("utf-8")).hexdigest()[:32]
+
+
+def _resumen(msg):
+    """Los campos de un mensaje tal como los guarda la secretaria.
+
+    Un solo lugar para esto, y no por prolijidad: `identidad()` se
+    recalcula sobre lo que devuelve un FETCH de cabeceras para confirmar
+    que el mensaje es el que creíamos, y si el recorte o el valor por
+    defecto de alguno de estos campos fuera distinto del que se usó al
+    guardarlo, el hash daría distinto y ningún correo sin Message-ID se
+    podría confirmar nunca. Tienen que ser exactamente los mismos.
+    """
+    return {"de": str(msg.get("From", ""))[:200],
+            "para": str(msg.get("To", ""))[:300],
+            "cc": str(msg.get("Cc", ""))[:300],
+            "asunto": str(msg.get("Subject", "(sin asunto)"))[:200],
+            "fecha": str(msg.get("Date", "")),
+            "message_id": str(msg.get("Message-ID", ""))}
 
 
 MESES_IMAP = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
@@ -200,17 +274,16 @@ def traer_correos(n, desde=None):
         # BODY.PEEK en vez de RFC822: no marca el correo como leído
         typ, d = M.fetch(i, "(BODY.PEEK[])")
         msg = email.message_from_bytes(d[0][1], policy=email.policy.default)
-        correos.append({
-            "uid": i.decode(),
-            "de": str(msg.get("From", ""))[:200],
-            "para": str(msg.get("To", ""))[:300],
-            "cc": str(msg.get("Cc", ""))[:300],
-            "asunto": str(msg.get("Subject", "(sin asunto)"))[:200],
-            "fecha": str(msg.get("Date", "")),
-            "message_id": str(msg.get("Message-ID", "")),
-            "cuerpo": texto_plano(msg)[:4000],
-            "adjuntos": adjuntos(msg),
-        })
+        # Ojo: acá `i` es un NÚMERO DE SECUENCIA (viene de M.search, no de
+        # M.uid("SEARCH")), no un UID. Se guarda por compatibilidad con
+        # los simulacros viejos, pero no sirve para ubicar nada después:
+        # los correos que se archivan salen de traer_nuevos().
+        correos.append(dict(
+            _resumen(msg),
+            uid=i.decode(),
+            cuerpo=texto_plano(msg)[:4000],
+            adjuntos=adjuntos(msg),
+        ))
     M.logout()
     return correos
 
@@ -250,45 +323,266 @@ def completar_adjuntos(correos):
     return correos
 
 
-def _uid_de(M, message_id):
-    """El UID actual de un mensaje, buscado por Message-ID.
+CABECERAS_DE_IDENTIDAD = ("(BODY.PEEK[HEADER.FIELDS"
+                          " (MESSAGE-ID FROM SUBJECT DATE)])")
 
-    Nunca por número de secuencia: el número cambia en cuanto se archiva o
-    se borra algo, y para entonces apunta a otro correo.
+
+def uidvalidity(M):
+    """El UIDVALIDITY de la carpeta seleccionada, o None si no se sabe.
+
+    Se lee de la respuesta del SELECT, que el RFC obliga a mandar, y se
+    guarda en la conexión. Lo de guardarlo no es una optimización:
+    `imaplib.response()` CONSUME la respuesta -la segunda llamada
+    devuelve None-, así que leerlo dos veces dejaba la comparación en "no
+    puedo comparar" sin que nada lo dijera. Probado contra la casilla
+    real: la primera lectura da 603289753 y la segunda, None.
+
+    Cuando de verdad no se sabe se devuelve None, y quien llama decide:
+    eso significa "no puedo comparar", no "está todo bien".
     """
-    typ, d = M.uid("SEARCH", None, "HEADER", "Message-ID", f'"{message_id}"')
-    uids = d[0].split()
-    return uids[-1] if uids else None
+    guardado = getattr(M, "_validez", None)
+    if guardado:
+        return guardado
+    try:
+        typ, d = M.response("UIDVALIDITY")
+        for parte in (d or []):
+            if parte:
+                valor = (parte.decode() if isinstance(parte, bytes)
+                         else str(parte)).strip()
+                M._validez = valor
+                return valor
+    except Exception:
+        pass
+    return None
 
 
-def mover_a(message_id, carpeta):
-    """Copia el mensaje a `carpeta` y lo borra de INBOX.
+def seleccionar(M, carpeta, readonly):
+    """Selecciona una carpeta y se queda con su UIDVALIDITY.
+
+    Todo select pasa por acá: el UIDVALIDITY es por carpeta, así que la
+    referencia vieja hay que tirarla en el momento de cambiar, no
+    después.
+    """
+    M._validez = None
+    M.select(carpeta, readonly=readonly)
+    return uidvalidity(M)
+
+
+def _como_bytes(uid):
+    if not uid:
+        return None
+    return uid if isinstance(uid, bytes) else str(uid).strip().encode()
+
+
+def _es_el_mismo(M, uid, esperada):
+    """¿El mensaje que hoy tiene ese UID es el que creemos?
+
+    Devuelve True (es ése), False (hay un mensaje pero es OTRO) o None (no
+    hay ningún mensaje con ese UID). Los tres casos son distintos y hacen
+    falta los tres: "es otro" obliga a no escribir, "no está" es benigno.
+
+    Se compara recalculando `identidad()` sobre las cabeceras que devuelve
+    el servidor, no sólo el Message-ID: así también se confirman los
+    correos que no traen Message-ID, que son justamente los que no se
+    podían ni ubicar.
+    """
+    typ, d = M.uid("FETCH", uid, CABECERAS_DE_IDENTIDAD)
+    if typ != "OK":
+        return None
+    for parte in (d or []):
+        if isinstance(parte, tuple) and len(parte) > 1 and parte[1]:
+            msg = email.message_from_bytes(parte[1],
+                                           policy=email.policy.default)
+            return identidad(_resumen(msg)) == esperada
+    return None
+
+
+def _criterio_de_busqueda(c):
+    """Con qué se le pregunta al servidor por un correo sin Message-ID.
+
+    El SEARCH acota (remitente y ventana de fechas) y después cada
+    candidato se confirma cabecera por cabecera: el criterio puede traer
+    de más, nunca decide solo. Lo que no puede es traer de menos, así que
+    la ventana va con un día para cada lado -las fechas del Date y las que
+    usa el servidor no siempre están en el mismo huso.
+    """
+    partes = []
+    direccion = email.utils.parseaddr(c.get("de") or "")[1]
+    if direccion and direccion.isascii():
+        partes += ["FROM", f'"{direccion}"']
+    try:
+        d = email.utils.parsedate_to_datetime(c.get("fecha") or "")
+        if d.tzinfo is None:
+            d = d.replace(tzinfo=timezone.utc)
+        d = d.astimezone(timezone.utc)
+        desde, hasta = d - timedelta(days=1), d + timedelta(days=2)
+        partes += ["SINCE", f"{desde.day:02d}-{MESES_IMAP[desde.month - 1]}"
+                            f"-{desde.year}",
+                   "BEFORE", f"{hasta.day:02d}-{MESES_IMAP[hasta.month - 1]}"
+                             f"-{hasta.year}"]
+    except Exception:
+        pass
+    return partes
+
+
+def _buscar_por_identidad(M, c):
+    """Ubica el mensaje en la carpeta seleccionada, confirmándolo.
+
+    Es la forma de ubicar un correo cuando el UID no sirve: en otra
+    carpeta (el UID de INBOX no significa nada en INBOX.Ruido) o cuando el
+    UID guardado ya no apunta a lo que apuntaba.
+
+    Con Message-ID alcanza el SEARCH por cabecera: si el servidor lo
+    encontró por esa cabecera, es ése. Sin Message-ID hay que acotar por
+    remitente y fecha y después confirmar cada candidato recalculando la
+    identidad sobre sus cabeceras -sin esa confirmación no se escribe.
+    """
+    esperada = identidad(c)
+    if not esperada.startswith("sha:"):
+        typ, d = M.uid("SEARCH", None, "HEADER", "Message-ID",
+                       f'"{esperada}"')
+        if typ != "OK" or not d or not d[0]:
+            return None
+        uids = d[0].split()
+        return uids[-1] if uids else None
+
+    criterio = _criterio_de_busqueda(c)
+    if not criterio:
+        # Ni Message-ID, ni remitente utilizable, ni fecha legible: no hay
+        # forma de preguntar por este correo sin recorrer la carpeta
+        # entera, y adivinar no es una opción cuando el paso siguiente
+        # borra algo.
+        raise IdentidadIncierta(
+            f"{esperada}: sin Message-ID, sin remitente y sin fecha"
+            " utilizables, no hay cómo ubicar el mensaje en el servidor")
+    typ, d = M.uid("SEARCH", None, *criterio)
+    if typ != "OK" or not d or not d[0]:
+        return None
+    # De atrás para adelante: el más nuevo primero, que es el que casi
+    # siempre buscamos. El tope es un resguardo contra una carpeta enorme,
+    # no un límite esperado: el criterio ya acota a un remitente y a tres
+    # días.
+    for uid in list(reversed(d[0].split()))[:60]:
+        if _es_el_mismo(M, uid, esperada):
+            return uid
+    return None
+
+
+def _ubicar_en_inbox(M, c):
+    """El UID del correo en INBOX, confirmado, o None si ya no está.
+
+    Primero el UID guardado, que es el identificador que el servidor
+    entiende y el único que existe para los correos sin Message-ID. Antes
+    de usarlo se chequea el UIDVALIDITY de la carpeta contra el que se
+    guardó junto al UID: si cambió, ese número puede ser hoy cualquier
+    otro correo y se levanta UidsVencidos en vez de escribir a ciegas. Y
+    aun cuando coincida, se confirma leyendo las cabeceras: comparar
+    números no alcanza para saber que el mensaje es el nuestro.
+
+    Si el UID no sirve -no lo hay, o quedó apuntando a otra cosa- se cae a
+    buscarlo por identidad, que confirma igual. Ese camino es el que
+    permite que un correo siga siendo archivable después de que alguien lo
+    mueva a mano y vuelva.
+    """
+    esperada = identidad(c)
+    uid = _como_bytes(c.get("uid"))
+    guardado = str(c.get("uidvalidity") or "").strip()
+    if uid:
+        actual = uidvalidity(M)
+        if guardado and actual and guardado != actual:
+            raise UidsVencidos(
+                f"{esperada}: el UIDVALIDITY de INBOX pasó de {guardado} a"
+                f" {actual}; los UID guardados ya no valen y no se toca"
+                " ningún mensaje hasta que alguien mire qué pasó")
+        if _es_el_mismo(M, uid, esperada):
+            return uid
+    return _buscar_por_identidad(M, c)
+
+
+def _sacar_de_inbox(M, uid, quien, carpeta):
+    """STORE +Deleted y UID EXPUNGE, con los dos `typ` chequeados.
+
+    Corre siempre DESPUÉS de que la copia en `carpeta` está confirmada,
+    así que un NO en cualquiera de los dos deja el mensaje duplicado y no
+    se puede reportar ni como éxito ni como "no pasó nada".
+    """
+    typ, _ = M.uid("STORE", uid, "+FLAGS", "(\\Deleted)")
+    if typ != "OK":
+        raise OperacionAMedias(
+            f"{quien}: está copiado en {carpeta} pero no se pudo marcar"
+            " para borrar en INBOX -- quedó duplicado")
+    typ, _ = M.uid("EXPUNGE", uid)
+    if typ != "OK":
+        raise OperacionAMedias(
+            f"{quien}: está copiado en {carpeta} y marcado para borrar,"
+            " pero el EXPUNGE no se confirmó -- sigue duplicado en INBOX")
+    return True
+
+
+def esta_en(M, carpeta, c):
+    """¿El correo ya existe en esa carpeta? Deja INBOX seleccionado.
+
+    Se pregunta antes de copiar. Un COPY que sale bien y una conexión que
+    se corta antes de que llegue el OK son indistinguibles desde acá: el
+    cliente ve un OSError igual que si no hubiera pasado nada, y el
+    reintento vuelve a copiar. Medido: una sola caída de red en ese punto
+    dejaba dos copias en Ruido, en silencio y sin que el estado final
+    dijera nada raro. Preguntar es la única forma de saberlo que no
+    depende de adivinar por el tipo de excepción.
+
+    La carpeta destino se abre readonly: acá sólo se mira.
+    """
+    try:
+        seleccionar(M, carpeta, readonly=True)
+        return _buscar_por_identidad(M, c) is not None
+    finally:
+        seleccionar(M, "INBOX", readonly=False)
+
+
+def mover_a(c, carpeta):
+    """Copia el correo a `carpeta` y lo borra de INBOX.
+
+    Recibe el correo entero, no un Message-ID: hace falta el UID (y el
+    UIDVALIDITY con el que se lo leyó) para poder ubicar también los
+    correos que no traen Message-ID, que son la mayoría del ruido. Ver
+    _ubicar_en_inbox.
 
     Devuelve True si terminó, y False SOLO en el caso benigno: el mensaje
     ya no está en INBOX. Todo lo que sí es una falla sale por una
     excepción -CopiaRechazada si el servidor no dejó copiar,
-    OperacionAMedias si copió pero no pudo borrar el original- porque un
-    booleano de dos valores no alcanza para tres finales distintos, y el
-    que se caía por la rendija era justo el que había que reintentar.
+    OperacionAMedias si copió pero no pudo borrar el original,
+    IdentidadIncierta si no se pudo confirmar cuál es el mensaje- porque
+    un booleano de dos valores no alcanza para tantos finales distintos, y
+    los que se caían por la rendija eran justo los que había que
+    reintentar.
 
     COPY + UID EXPUNGE porque el servidor no tiene MOVE pero sí UIDPLUS.
     Nunca EXPUNGE a secas: eso borraría otros mensajes marcados.
 
-    El `typ` de LOS TRES comandos se chequea a propósito: `imaplib` sólo
+    El `typ` de los tres comandos se chequea a propósito: `imaplib` sólo
     levanta excepción si el servidor contesta BAD. Una respuesta NO
     -carpeta que no existe, cuota superada, un error transitorio- vuelve
-    en silencio. Sin chequear el COPY, un NO ahí borraba un correo sin
-    haberlo copiado a ningún lado (eso ya se arregló). Un NO en el STORE
-    o el EXPUNGE, DESPUÉS de un COPY que sí salió bien, es otro problema:
-    acá ya existe una copia nueva en `carpeta`, así que ni devolver True
-    (mentiría: no terminó como se pidió) ni False (también mentiría: sí
-    se copió algo) describe lo que pasó.
+    en silencio.
     """
+    quien = identidad(c)
     M = abrir_buzon(readonly=False)
     try:
-        uid = _uid_de(M, message_id)
+        uid = _ubicar_en_inbox(M, c)
         if not uid:
-            return False
+            # Ya no está en INBOX. Si la copia está en el destino, la
+            # mudanza terminó -en un intento anterior cuya respuesta se
+            # perdió, o a mano- y decir False haría que la base lo anote
+            # como "clasificado", o sea sin archivar, cuando está
+            # archivado. Si no está en ningún lado, ahí sí no hay nada
+            # que hacer.
+            return esta_en(M, carpeta, c)
+        if esta_en(M, carpeta, c):
+            # Ya hay una copia allá: copiar de nuevo dejaría dos. Lo único
+            # que falta es sacar el original de INBOX, que es la misma
+            # mitad que reintenta borrar_el_original(). El UID sigue
+            # sirviendo: esta_en() deja INBOX seleccionado y el
+            # UIDVALIDITY ya se chequeó al ubicarlo.
+            return _sacar_de_inbox(M, uid, quien, carpeta)
         typ, respuesta = M.uid("COPY", uid, carpeta)
         if typ != "OK":
             # Nada se copió: no hay nada que deshacer, es seguro
@@ -298,26 +592,15 @@ def mover_a(message_id, carpeta):
             # del servidor -cuota, carpeta, permisos- que hay que
             # reintentar y, si no se arregla, contarle a JP.
             raise CopiaRechazada(
-                f"{message_id}: el servidor rechazó copiar a {carpeta}"
+                f"{quien}: el servidor rechazó copiar a {carpeta}"
                 f" -- {_motivo(respuesta)}")
-        typ, _ = M.uid("STORE", uid, "+FLAGS", "(\\Deleted)")
-        if typ != "OK":
-            raise OperacionAMedias(
-                f"{message_id}: se copió a {carpeta} pero no se pudo"
-                " marcar para borrar en INBOX -- quedó duplicado")
-        typ, _ = M.uid("EXPUNGE", uid)
-        if typ != "OK":
-            raise OperacionAMedias(
-                f"{message_id}: se copió a {carpeta} y se marcó para"
-                " borrar, pero el EXPUNGE no se confirmó -- puede haber"
-                " quedado duplicado en INBOX")
-        return True
+        return _sacar_de_inbox(M, uid, quien, carpeta)
     finally:
         M.logout()
 
 
-def borrar_el_original(message_id):
-    """Saca de INBOX un mensaje que YA está copiado en otra carpeta.
+def borrar_el_original(c):
+    """Saca de INBOX un correo que YA está copiado en otra carpeta.
 
     Es la mitad que falta cuando mover_a() levanta OperacionAMedias: el
     COPY se confirmó pero el STORE +Deleted o el UID EXPUNGE no, así que
@@ -337,29 +620,19 @@ def borrar_el_original(message_id):
     """
     M = abrir_buzon(readonly=False)
     try:
-        uid = _uid_de(M, message_id)
+        uid = _ubicar_en_inbox(M, c)
         if not uid:
             return False
-        typ, _ = M.uid("STORE", uid, "+FLAGS", "(\\Deleted)")
-        if typ != "OK":
-            raise OperacionAMedias(
-                f"{message_id}: sigue copiado en el destino y sin poder"
-                " marcarse para borrar en INBOX")
-        typ, _ = M.uid("EXPUNGE", uid)
-        if typ != "OK":
-            raise OperacionAMedias(
-                f"{message_id}: marcado para borrar en INBOX, pero el"
-                " EXPUNGE no se confirmó -- sigue duplicado")
-        return True
+        return _sacar_de_inbox(M, uid, identidad(c), "el destino")
     finally:
         M.logout()
 
 
-def marcar_leido(message_id):
-    """Marca un mensaje como leído sin tocar ninguna otra cosa."""
+def marcar_leido(c):
+    """Marca un correo como leído sin tocar ninguna otra cosa."""
     M = abrir_buzon(readonly=False)
     try:
-        uid = _uid_de(M, message_id)
+        uid = _ubicar_en_inbox(M, c)
         if not uid:
             return False
         typ, _ = M.uid("STORE", uid, "+FLAGS", "(\\Seen)")
@@ -368,8 +641,8 @@ def marcar_leido(message_id):
         M.logout()
 
 
-def devolver_a_bandeja(message_id):
-    """Saca un mensaje de INBOX.Ruido y lo deja en INBOX SIN LEER.
+def devolver_a_bandeja(c):
+    """Saca un correo de INBOX.Ruido y lo deja en INBOX SIN LEER.
 
     Sin leer a propósito: si JP dice que no era ruido, tiene que
     encontrarlo como encontraría cualquier correo que no vio.
@@ -392,13 +665,19 @@ def devolver_a_bandeja(message_id):
     corren DESPUÉS de que el COPY ya confirmó una copia nueva en INBOX:
     un NO en cualquiera de esos dos deja un duplicado -mismo caso que en
     mover_a- y levanta OperacionAMedias en vez de mentir con un booleano.
+
+    Acá el mensaje se ubica SIEMPRE por identidad y nunca por el UID
+    guardado: ese UID es el que tenía en INBOX, y en INBOX.Ruido el mismo
+    número es otro correo. Es la razón por la que ubicar en INBOX y ubicar
+    en otra carpeta son dos funciones distintas y no un parámetro.
     """
+    quien = identidad(c)
     M = imaplib.IMAP4_SSL(os.environ["IMAP_HOST"],
                           int(os.environ["IMAP_PORT"]), timeout=40)
     M.login(os.environ["IMAP_USER"], os.environ["IMAP_PASSWORD"])
     try:
-        M.select("INBOX.Ruido", readonly=False)
-        uid = _uid_de(M, message_id)
+        seleccionar(M, "INBOX.Ruido", readonly=False)
+        uid = _buscar_por_identidad(M, c)
         if not uid:
             return False
         typ, _ = M.uid("STORE", uid, "-FLAGS", "(\\Seen)")
@@ -411,12 +690,12 @@ def devolver_a_bandeja(message_id):
         typ, _ = M.uid("STORE", uid, "+FLAGS", "(\\Deleted)")
         if typ != "OK":
             raise OperacionAMedias(
-                f"{message_id}: se copió a INBOX (ya sin \\Seen) pero no"
+                f"{quien}: se copió a INBOX (ya sin \\Seen) pero no"
                 " se pudo marcar para borrar en Ruido -- quedó duplicado")
         typ, _ = M.uid("EXPUNGE", uid)
         if typ != "OK":
             raise OperacionAMedias(
-                f"{message_id}: se copió a INBOX y se marcó para borrar"
+                f"{quien}: se copió a INBOX y se marcó para borrar"
                 " en Ruido, pero el EXPUNGE no se confirmó -- puede"
                 " haber quedado duplicado")
         return True
@@ -432,6 +711,7 @@ def traer_nuevos(desde_fecha):
     """
     M = abrir_buzon(readonly=True)
     try:
+        validez = uidvalidity(M)
         criterio = (f"{desde_fecha.day:02d}-{MESES_IMAP[desde_fecha.month - 1]}"
                     f"-{desde_fecha.year}")
         typ, d = M.uid("SEARCH", None, "SINCE", criterio)
@@ -441,18 +721,17 @@ def traer_nuevos(desde_fecha):
             crudo = dd[0][1]
             banderas = str(dd[0][0])
             msg = email.message_from_bytes(crudo, policy=email.policy.default)
-            salida.append({
-                "uid": uid.decode(),
-                "de": str(msg.get("From", ""))[:200],
-                "para": str(msg.get("To", ""))[:300],
-                "cc": str(msg.get("Cc", ""))[:300],
-                "asunto": str(msg.get("Subject", "(sin asunto)"))[:200],
-                "fecha": str(msg.get("Date", "")),
-                "message_id": str(msg.get("Message-ID", "")),
-                "cuerpo": texto_plano(msg)[:4000],
-                "adjuntos": adjuntos(msg),
-                "ya_leido": "\\Seen" in banderas,
-            })
+            salida.append(dict(
+                _resumen(msg),
+                uid=uid.decode(),
+                # El UID solo no alcanza: vale mientras el UIDVALIDITY de
+                # la carpeta sea éste. Se guardan juntos porque juntos son
+                # una referencia y por separado son un número suelto.
+                uidvalidity=validez,
+                cuerpo=texto_plano(msg)[:4000],
+                adjuntos=adjuntos(msg),
+                ya_leido="\\Seen" in banderas,
+            ))
         return salida
     finally:
         M.logout()

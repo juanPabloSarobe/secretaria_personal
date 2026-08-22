@@ -1,3 +1,4 @@
+import os
 import tempfile
 import threading
 import time
@@ -6,15 +7,41 @@ import unittest.mock as mock
 from datetime import datetime
 from unittest.mock import patch
 
+import correo
 import memoria
 import secretaria
+from tests.buzon_falso import BuzonFalso, correo_de, hace
 from tests.test_correo import _IMAPFalso
+
+UID = "77"
+VALIDEZ = "1000"
 
 
 def correo_falso(mid, asunto, de="promo@ejemplo.com"):
-    return {"message_id": mid, "uid": "1", "de": de, "para": "jp@x", "cc": "",
-            "asunto": asunto, "fecha": "Mon, 17 Aug 2026 09:00:00 -0300",
+    """Un correo como el que deja traer_nuevos().
+
+    Trae `uid` y `uidvalidity` porque desde la ronda 6 son parte de la
+    referencia con la que se ubica el mensaje en el servidor: el
+    Message-ID no alcanza -no todos los correos lo traen- y el UID solo
+    tampoco, porque vale mientras el UIDVALIDITY de la carpeta no cambie.
+    """
+    return {"message_id": mid, "uid": UID, "uidvalidity": VALIDEZ, "de": de,
+            "para": "jp@x", "cc": "", "asunto": asunto,
+            "fecha": "Mon, 17 Aug 2026 09:00:00 -0300",
             "cuerpo": "cuerpo", "adjuntos": []}
+
+
+def buzon_con(c, **como_contesta):
+    """El doble de IMAP con ESE correo adentro de INBOX.
+
+    Que el mensaje del buzón sea el mismo que el de la base no es un
+    detalle de armado: si no coinciden, el código no lo encuentra -y tiene
+    que no encontrarlo-. El doble viejo contestaba que sí a cualquier
+    búsqueda y por eso no se notaba la diferencia.
+    """
+    como_contesta.setdefault("uid_buscado", c["uid"].encode())
+    return _IMAPFalso(mid=c["message_id"], de=c["de"], asunto=c["asunto"],
+                      fecha=c["fecha"], **como_contesta)
 
 
 class _CxMuda:
@@ -330,7 +357,13 @@ class RevisarCasilla(unittest.TestCase):
              mock.patch.object(secretaria.correo, "mover_a",
                                return_value=True) as mover:
             self.s.revisar_casilla()
-        mover.assert_called_once_with("<3@x>", "INBOX.Ruido")
+        # Recibe el correo entero y no un Message-ID: mover_a necesita el
+        # UID y el UIDVALIDITY para poder ubicar también los correos que
+        # no traen Message-ID (ver ronda 6, hallazgo 1).
+        mover.assert_called_once()
+        pasado, carpeta = mover.call_args[0]
+        self.assertEqual(pasado["message_id"], "<3@x>")
+        self.assertEqual(carpeta, "INBOX.Ruido")
         self.assertEqual(memoria.situacion(self.s.cx, "<3@x>"), "archivado")
 
     def test_un_correo_ya_procesado_no_se_reprocesa(self):
@@ -664,7 +697,7 @@ class TopeDeReintentos(unittest.TestCase):
         cada vuelta del ciclo reintentaba el mover_a completo y dejaba
         una copia nueva."""
         c = correo_falso("<17@x>", "Promo")
-        fake = _IMAPFalso(copy_ok=True, store_ok=True, expunge_ok=False)
+        fake = buzon_con(c, copy_ok=True, store_ok=True, expunge_ok=False)
         with mock.patch.object(secretaria, "EN_SECO", False), \
              mock.patch.object(secretaria.correo, "abrir_buzon",
                                return_value=fake), \
@@ -777,7 +810,7 @@ class TopeDeReintentos(unittest.TestCase):
 
     def test_el_reintento_a_medias_no_vuelve_a_consultar_al_modelo(self):
         c = correo_falso("<22@x>", "Promo")
-        fake = _IMAPFalso(copy_ok=True, store_ok=True, expunge_ok=False)
+        fake = buzon_con(c, copy_ok=True, store_ok=True, expunge_ok=False)
         with mock.patch.object(secretaria, "EN_SECO", False), \
              mock.patch.object(secretaria.correo, "abrir_buzon",
                                return_value=fake), \
@@ -797,7 +830,7 @@ class TopeDeReintentos(unittest.TestCase):
         """El EXPUNGE falla la primera vez (queda a medias) y anda la
         segunda: el correo termina archivado, con UN solo COPY."""
         c = correo_falso("<23@x>", "Promo")
-        fake = _IMAPFalso(copy_ok=True, store_ok=True, expunge_ok=False)
+        fake = buzon_con(c, copy_ok=True, store_ok=True, expunge_ok=False)
         with mock.patch.object(secretaria, "EN_SECO", False), \
              mock.patch.object(secretaria.correo, "abrir_buzon",
                                return_value=fake), \
@@ -853,7 +886,7 @@ class CopyRechazado(unittest.TestCase):
 
     def test_un_copy_rechazado_persistente_agota_el_tope_y_avisa_una_vez(self):
         c = correo_falso("<24@x>", "Promo")
-        fake = _IMAPFalso(copy_ok=False)
+        fake = buzon_con(c, copy_ok=False)
         enviar = self._ciclos(c, fake, 20)
 
         # Reintentó, pero nunca de más: un COPY por vuelta hasta el tope.
@@ -869,7 +902,7 @@ class CopyRechazado(unittest.TestCase):
     def test_el_aviso_dice_que_fue_el_servidor_y_por_que(self):
         c = correo_falso("<25@x>", "Factura de agosto",
                          de="cobranzas@proveedor.com")
-        enviar = self._ciclos(c, _IMAPFalso(copy_ok=False),
+        enviar = self._ciclos(c, buzon_con(c, copy_ok=False),
                               secretaria.INTENTOS_MAXIMOS + 2)
         texto = enviar.call_args[0][0]
         self.assertIn("Factura de agosto", texto)
@@ -883,10 +916,13 @@ class CopyRechazado(unittest.TestCase):
         JP. Si esto se volviera ruidoso, el aviso que sí importa se
         perdería entre los que no."""
         c = correo_falso("<26@x>", "Promo")
-        fake = _IMAPFalso(uid_buscado=None)
+        fake = buzon_con(c, uid_buscado=None)
         enviar = self._ciclos(c, fake, 10)
 
-        self.assertEqual([x[0] for x in fake.comandos], ["SEARCH"])
+        # Sólo pregunta -FETCH del UID guardado, búsqueda en INBOX y
+        # búsqueda en el destino-, ninguna escritura.
+        self.assertEqual([x[0] for x in fake.comandos],
+                         ["FETCH", "SEARCH", "SEARCH"])
         self.assertEqual(memoria.situacion(self.s.cx, "<26@x>"), "clasificado")
         self.assertEqual(self._intentos("<26@x>"), 0)
         enviar.assert_not_called()
@@ -895,7 +931,7 @@ class CopyRechazado(unittest.TestCase):
         """Una falla corta del servidor se resuelve sola dentro del tope,
         como cualquier otra."""
         c = correo_falso("<27@x>", "Promo")
-        fake = _IMAPFalso(copy_ok=False)
+        fake = buzon_con(c, copy_ok=False)
         with mock.patch.object(secretaria, "EN_SECO", False), \
              mock.patch.object(secretaria.correo, "abrir_buzon",
                                return_value=fake), \
@@ -913,6 +949,299 @@ class CopyRechazado(unittest.TestCase):
             self.s.revisar_casilla()
         self.assertEqual(memoria.situacion(self.s.cx, "<27@x>"), "archivado")
         enviar.assert_not_called()
+
+
+
+class PendientesDeLaBase(unittest.TestCase):
+    """Hallazgo 2 de la ronda 6: el reintento funcionaba de casualidad.
+
+    Nadie llamaba a memoria.pendientes(). Un correo en
+    pendiente_de_archivar se reintentaba sólo porque volvía a aparecer en
+    la ventana de un día de traer_nuevos(); si el proceso se reiniciaba
+    cruzando ese borde -y launchd lo reinicia por diseño- el correo
+    quedaba abandonado para siempre: no llegaba al tope, no generaba
+    aviso, no lo miraba nadie. Medido: 10 vueltas del ciclo, cero
+    intentos de escritura. Ahora lo que falta hacer sale del estado, que
+    es la fuente de verdad; la ventana de búsqueda es una casualidad."""
+
+    def setUp(self):
+        self.f = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.s = secretaria.Secretaria(cx=memoria.abrir(self.f.name))
+
+    def _dejar_pendiente(self, mid, situacion):
+        c = correo_falso(mid, "Promo")
+        memoria.anotar(self.s.cx, c, "RUIDO", "promo")
+        memoria.cambiar(self.s.cx, mid, situacion)
+        return c
+
+    def _ciclos(self, vueltas, **parches):
+        # traer_nuevos vacío: el correo YA no aparece entre los entrantes.
+        with mock.patch.object(secretaria, "EN_SECO", False), \
+             mock.patch.object(secretaria.correo, "traer_nuevos",
+                               return_value=[]), \
+             mock.patch.object(secretaria.clasificador, "clasificar") as cl, \
+             mock.patch.object(self.s, "enviar") as enviar:
+            for nombre, valor in parches.items():
+                self.addCleanup(mock.patch.object(
+                    secretaria.correo, nombre, valor).stop)
+            with mock.patch.multiple(secretaria.correo, **parches):
+                for _ in range(vueltas):
+                    self.s.revisar_casilla()
+        return cl, enviar
+
+    def test_un_pendiente_de_archivar_fuera_de_la_ventana_se_reintenta(self):
+        self._dejar_pendiente("<p1@x>", "pendiente_de_archivar")
+        mover = mock.Mock(return_value=True)
+        cl, enviar = self._ciclos(1, mover_a=mover)
+        mover.assert_called_once()
+        self.assertEqual(memoria.situacion(self.s.cx, "<p1@x>"), "archivado")
+        # y sin volver a consultar al modelo: ya se sabe que es RUIDO
+        cl.assert_not_called()
+
+    def test_un_pendiente_de_borrar_fuera_de_la_ventana_se_reintenta(self):
+        """Y se reintenta SÓLO el borrado: la copia ya está hecha, un COPY
+        nuevo dejaría un duplicado."""
+        self._dejar_pendiente("<p2@x>", "pendiente_de_borrar")
+        borrar = mock.Mock(return_value=True)
+        mover = mock.Mock()
+        self._ciclos(1, borrar_el_original=borrar, mover_a=mover)
+        borrar.assert_called_once()
+        mover.assert_not_called()
+        self.assertEqual(memoria.situacion(self.s.cx, "<p2@x>"), "archivado")
+
+    def test_el_tope_y_el_aviso_valen_igual_fuera_de_la_ventana(self):
+        """Lo que antes quedaba abandonado en silencio ahora llega a un
+        estado final: se agotan los intentos y JP se entera."""
+        self._dejar_pendiente("<p3@x>", "pendiente_de_archivar")
+        mover = mock.Mock(side_effect=RuntimeError("red caída"))
+        cl, enviar = self._ciclos(20, mover_a=mover)
+        self.assertEqual(mover.call_count, secretaria.INTENTOS_MAXIMOS)
+        self.assertEqual(memoria.situacion(self.s.cx, "<p3@x>"),
+                         "no_se_pudo_archivar")
+        self.assertEqual(enviar.call_count, 1)
+
+    def test_no_se_reintenta_dos_veces_en_la_misma_vuelta(self):
+        """El correo está en la base COMO pendiente y además sigue
+        cayendo en la ventana de traer_nuevos. Es un intento por vuelta,
+        no dos: si no, el tope se quemaría al doble de velocidad y el
+        aviso llegaría antes de tiempo."""
+        c = self._dejar_pendiente("<p4@x>", "pendiente_de_archivar")
+        with mock.patch.object(secretaria, "EN_SECO", False), \
+             mock.patch.object(secretaria.correo, "traer_nuevos",
+                               return_value=[c]), \
+             mock.patch.object(secretaria.correo, "mover_a",
+                               side_effect=RuntimeError("red caída")) as mover, \
+             mock.patch.object(self.s, "enviar"):
+            self.s.revisar_casilla()
+        mover.assert_called_once()
+
+    def test_un_pendiente_sobrevive_a_un_reinicio_del_proceso(self):
+        """launchd levanta el proceso de nuevo y la Secretaria es otra:
+        lo que falta hacer tiene que salir de la base, no de la memoria
+        del proceso que se murió."""
+        self._dejar_pendiente("<p5@x>", "pendiente_de_archivar")
+        otra = secretaria.Secretaria(cx=memoria.abrir(self.f.name))
+        with mock.patch.object(secretaria, "EN_SECO", False), \
+             mock.patch.object(secretaria.correo, "traer_nuevos",
+                               return_value=[]), \
+             mock.patch.object(secretaria.correo, "mover_a",
+                               return_value=True) as mover, \
+             mock.patch.object(otra, "enviar"):
+            otra.revisar_casilla()
+        mover.assert_called_once()
+        self.assertEqual(memoria.situacion(otra.cx, "<p5@x>"), "archivado")
+
+
+class ElAvisoNoSePierde(unittest.TestCase):
+    """Hallazgo 3: el correo pasaba a estado terminal ANTES de que el
+    aviso saliera, y enviar() se traga cualquier excepción devolviendo
+    None sin que nadie mire el retorno. Con Telegram caído en ese momento
+    el aviso no se reintentaba nunca y JP no se enteraba: medido, 30
+    vueltas del ciclo y un solo intento de envío."""
+
+    def setUp(self):
+        self.f = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.s = secretaria.Secretaria(cx=memoria.abrir(self.f.name))
+        self.c = correo_falso("<t1@x>", "Promo")
+
+    def _ciclos(self, vueltas, enviar):
+        with mock.patch.object(secretaria, "EN_SECO", False), \
+             mock.patch.object(secretaria.correo, "traer_nuevos",
+                               return_value=[self.c]), \
+             mock.patch.object(secretaria.clasificador, "clasificar",
+                               return_value={"categoria": "RUIDO",
+                                             "motivo": "promo",
+                                             "unanime": True}), \
+             mock.patch.object(secretaria.correo, "mover_a",
+                               side_effect=RuntimeError("red caída")) as mover, \
+             mock.patch.object(self.s, "enviar", enviar):
+            for _ in range(vueltas):
+                self.s.revisar_casilla()
+        return mover
+
+    def test_con_telegram_caido_el_aviso_se_reintenta(self):
+        caido = mock.Mock(return_value=None)      # enviar() no pudo
+        self._ciclos(30, caido)
+        self.assertGreater(caido.call_count, 1)
+        # y el correo NO quedó en un estado que nadie vuelve a mirar
+        self.assertEqual(memoria.situacion(self.s.cx, "<t1@x>"),
+                         "pendiente_de_archivar")
+
+    def test_con_el_tope_agotado_no_se_toca_mas_la_casilla(self):
+        """Reintentar el aviso no es reintentar la escritura: el aviso no
+        duplica nada, un COPY sí."""
+        mover = self._ciclos(30, mock.Mock(return_value=None))
+        self.assertEqual(mover.call_count, secretaria.INTENTOS_MAXIMOS)
+
+    def test_cuando_telegram_vuelve_sale_el_aviso_y_recien_ahi_cierra(self):
+        self._ciclos(10, mock.Mock(return_value=None))
+        self.assertEqual(memoria.situacion(self.s.cx, "<t1@x>"),
+                         "pendiente_de_archivar")
+        anda = mock.Mock(return_value={"ok": True})
+        self._ciclos(3, anda)
+        self.assertEqual(anda.call_count, 1)
+        self.assertEqual(memoria.situacion(self.s.cx, "<t1@x>"),
+                         "no_se_pudo_archivar")
+
+    def test_el_aviso_atrasado_sigue_diciendo_que_fue_lo_que_fallo(self):
+        """Aunque el proceso se haya reiniciado en el medio: por eso la
+        falla se guarda en la base y no en una variable."""
+        self._ciclos(10, mock.Mock(return_value=None))
+        otra = secretaria.Secretaria(cx=memoria.abrir(self.f.name))
+        anda = mock.Mock(return_value={"ok": True})
+        with mock.patch.object(secretaria, "EN_SECO", False), \
+             mock.patch.object(secretaria.correo, "traer_nuevos",
+                               return_value=[]), \
+             mock.patch.object(otra, "enviar", anda):
+            otra.revisar_casilla()
+        texto = anda.call_args[0][0]
+        self.assertIn("RuntimeError", texto)
+        self.assertIn("red caída", texto)
+        self.assertIn("Promo", texto)
+        self.assertEqual(memoria.situacion(otra.cx, "<t1@x>"),
+                         "no_se_pudo_archivar")
+
+    def test_un_ok_false_de_telegram_no_cuenta_como_enviado(self):
+        """Telegram puede contestar 200 con {"ok": false} -un chat_id que
+        no existe, el bot bloqueado-. Eso no es un aviso entregado, y
+        darlo por bueno sería perderlo igual que antes."""
+        with mock.patch.object(secretaria.bot, "tg",
+                               return_value={"ok": False,
+                                             "description": "chat not found"}), \
+             mock.patch.dict(os.environ, {"TELEGRAM_CHAT_ID": "1"}):
+            self._ciclos(10, secretaria.Secretaria.enviar.__get__(self.s))
+        self.assertEqual(memoria.situacion(self.s.cx, "<t1@x>"),
+                         "pendiente_de_archivar")
+
+
+class ElAvisoDiceDondeQuedo(unittest.TestCase):
+    """Hallazgo 5: el aviso decía siempre "quedó en tu bandeja, sin
+    archivar", que en el caso a medias es falso -está en la bandeja Y en
+    Ruido-. Mandar a JP a archivarlo de nuevo es dejarlo con dos copias."""
+
+    def setUp(self):
+        self.f = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.s = secretaria.Secretaria(cx=memoria.abrir(self.f.name))
+
+    def _texto(self, falla, situacion):
+        c = correo_falso("<d1@x>", "Promo")
+        memoria.anotar(self.s.cx, c, "RUIDO", "promo")
+        memoria.anotar_falla(self.s.cx, "<d1@x>", falla)
+        memoria.cambiar(self.s.cx, "<d1@x>", situacion)
+        for _ in range(secretaria.INTENTOS_MAXIMOS):
+            memoria.sumar_intento(self.s.cx, "<d1@x>")
+        with mock.patch.object(secretaria, "EN_SECO", False), \
+             mock.patch.object(secretaria.correo, "traer_nuevos",
+                               return_value=[]), \
+             mock.patch.object(self.s, "enviar") as enviar:
+            self.s.revisar_casilla()
+        return enviar.call_args[0][0]
+
+    def test_si_quedo_duplicado_el_aviso_lo_dice(self):
+        texto = self._texto("OperacionAMedias: no se pudo borrar",
+                            "pendiente_de_borrar")
+        self.assertIn("duplicado", texto)
+        self.assertIn("INBOX.Ruido", texto)
+
+    def test_si_no_se_copio_nada_dice_que_sigue_en_la_bandeja(self):
+        texto = self._texto("CopiaRechazada: cuota agotada",
+                            "pendiente_de_archivar")
+        self.assertIn("Quedó en tu bandeja, sin archivar", texto)
+        self.assertNotIn("duplicado", texto)
+
+
+class ContraElServidorConEstado(unittest.TestCase):
+    """El ciclo entero contra un buzón de verdad -carpetas, UIDs,
+    búsqueda-, que es lo que hacía falta para ver los hallazgos 1 y 4:
+    con un doble que contesta que sí a cualquier búsqueda, los dos pasan
+    desapercibidos."""
+
+    def setUp(self):
+        self.f = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.s = secretaria.Secretaria(cx=memoria.abrir(self.f.name))
+
+    def _ciclos(self, buzon, entrantes, vueltas):
+        with mock.patch.object(secretaria, "EN_SECO", False), \
+             mock.patch.object(secretaria.correo, "abrir_buzon",
+                               return_value=buzon), \
+             mock.patch.object(secretaria.correo, "traer_nuevos",
+                               return_value=entrantes), \
+             mock.patch.object(secretaria.clasificador, "clasificar",
+                               return_value={"categoria": "RUIDO",
+                                             "motivo": "promo",
+                                             "unanime": True}), \
+             mock.patch.object(self.s, "enviar") as enviar:
+            for _ in range(vueltas):
+                self.s.revisar_casilla()
+        return enviar
+
+    def test_un_correo_sin_message_id_se_archiva(self):
+        """Hallazgo 1, de punta a punta: antes, 10 vueltas del ciclo lo
+        dejaban en la bandeja con situación "clasificado", cero
+        reintentos y cero avisos."""
+        buzon = BuzonFalso()
+        m = buzon.agregar("INBOX", de="no-reply@facturas.com",
+                          asunto="Tu resumen", fecha=hace(0), message_id="")
+        c = correo_de(m)
+        enviar = self._ciclos(buzon, [c], 10)
+        self.assertEqual(buzon.cuenta("INBOX"), 0)
+        self.assertEqual(buzon.cuenta("INBOX.Ruido"), 1)
+        self.assertEqual(memoria.situacion(self.s.cx, correo.identidad(c)),
+                         "archivado")
+        enviar.assert_not_called()
+
+    def test_un_corte_despues_del_copy_no_deja_dos_copias(self):
+        """Hallazgo 4, de punta a punta: antes, una sola caída de red en
+        ese punto dejaba dos copias en Ruido, situación "archivado" y
+        cero avisos -- completamente silencioso."""
+        buzon = BuzonFalso()
+        buzon.plan["COPY"] = ["RED_DESPUES"]
+        m = buzon.agregar("INBOX", asunto="Promo", fecha=hace(0),
+                          message_id="<corte@x>")
+        c = correo_de(m)
+        enviar = self._ciclos(buzon, [c], 5)
+        self.assertEqual(len(buzon.de_comando("COPY")), 1)
+        self.assertEqual(buzon.cuenta("INBOX.Ruido"), 1)
+        self.assertEqual(buzon.cuenta("INBOX"), 0)
+        self.assertEqual(memoria.situacion(self.s.cx, "<corte@x>"),
+                         "archivado")
+        enviar.assert_not_called()
+
+    def test_si_cambio_el_uidvalidity_no_archiva_a_ciegas_y_avisa(self):
+        """Los UID guardados dejaron de valer. Lo que no puede pasar es
+        que se toque el mensaje equivocado; lo segundo que no puede pasar
+        es que nadie se entere."""
+        buzon = BuzonFalso()
+        m = buzon.agregar("INBOX", message_id="<uv@x>", fecha=hace(0))
+        c = correo_de(m)
+        buzon.uidvalidity["INBOX"] = "9999"
+        enviar = self._ciclos(buzon, [c], 20)
+        self.assertEqual(buzon.cuenta("INBOX"), 1)
+        self.assertEqual(buzon.cuenta("INBOX.Ruido"), 0)
+        self.assertEqual(memoria.situacion(self.s.cx, "<uv@x>"),
+                         "no_se_pudo_archivar")
+        self.assertEqual(enviar.call_count, 1)
+        self.assertIn("UidsVencidos", enviar.call_args[0][0])
 
 
 

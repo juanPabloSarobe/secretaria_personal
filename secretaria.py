@@ -179,7 +179,7 @@ class Secretaria:
         if not self.puede_escribir():
             return
         try:
-            if correo.mover_a(c["message_id"], "INBOX.Ruido"):
+            if correo.mover_a(c, "INBOX.Ruido"):
                 memoria.cambiar(self.cx, c["message_id"], "archivado")
             else:
                 # No estaba en INBOX -alguien ya lo movió o lo borró a
@@ -218,7 +218,7 @@ class Secretaria:
         if not self.puede_escribir():
             return
         try:
-            correo.borrar_el_original(c["message_id"])
+            correo.borrar_el_original(c)
             memoria.cambiar(self.cx, c["message_id"], "archivado")
         except Exception as e:
             self._anotar_falla(c, e, "pendiente_de_borrar")
@@ -230,19 +230,69 @@ class Secretaria:
         segundos para siempre y lo único que queda es una línea en un log
         que nadie mira: la falla silenciosa que el diseño dice que es la
         que más preocupa, porque no recibir avisos se parece demasiado a
-        un día tranquilo. Al agotarse los intentos el correo pasa a
-        "no_se_pudo_archivar" -que revisar_casilla ya no reintenta- y JP
-        se entera por Telegram. El aviso sale UNA sola vez por
-        construcción: la situación final no vuelve a entrar nunca en la
-        rama de reintento.
+        un día tranquilo. Al agotarse los intentos se deja de tocar la
+        casilla y JP se entera por Telegram.
+
+        El correo queda en su situación pendiente -la que dice QUÉ quedó
+        hecho- hasta que el aviso salga de verdad. Recién ahí pasa a
+        "no_se_pudo_archivar", que es un estado terminal: nadie lo vuelve
+        a mirar. Ese orden es el arreglo: antes se marcaba terminal
+        primero y se avisaba después, así que si Telegram estaba caído en
+        ese momento el aviso se perdía para siempre y el correo quedaba
+        sin archivar sin que nadie lo supiera. Medido: 30 vueltas del
+        ciclo con Telegram caído, un solo intento de envío.
         """
         _registrar("archivar", e)
+        memoria.anotar_falla(self.cx, c["message_id"],
+                             f"{type(e).__name__}: {e}")
         intentos = memoria.sumar_intento(self.cx, c["message_id"])
+        memoria.cambiar(self.cx, c["message_id"], pendiente)
         if intentos >= INTENTOS_MAXIMOS:
-            memoria.cambiar(self.cx, c["message_id"], "no_se_pudo_archivar")
-            self.avisar_que_no_se_pudo_archivar(c, e)
-        else:
-            memoria.cambiar(self.cx, c["message_id"], pendiente)
+            self._avisar_la_falla(dict(c, situacion=pendiente,
+                                       falla=f"{type(e).__name__}: {e}"))
+
+    def _avisar_la_falla(self, fila):
+        """Le cuenta a JP que un correo se quedó sin intentos.
+
+        Sólo si el aviso salió de verdad el correo pasa a terminal. Si no
+        salió, se queda donde está y la vuelta siguiente lo reintenta:
+        reintentar un aviso que no llegó no duplica nada -a diferencia de
+        reintentar un COPY- así que acá no hace falta tope. Lo que no
+        puede pasar es que el mensaje que existe para que nada quede en
+        silencio se pierda en silencio.
+        """
+        if self.avisar_que_no_se_pudo_archivar(
+                fila, fila.get("falla") or "(no quedó registrado)",
+                fila.get("situacion") == "pendiente_de_borrar"):
+            memoria.cambiar(self.cx, fila["message_id"],
+                            "no_se_pudo_archivar")
+
+    def _atender_pendientes(self):
+        """Retoma lo que quedó a medio hacer, leyéndolo de la BASE.
+
+        El estado es la fuente de verdad de lo que falta hacer. Antes esto
+        no existía: un correo en pendiente_de_archivar se reintentaba sólo
+        porque volvía a aparecer en la ventana de un día de traer_nuevos,
+        o sea por casualidad. Si el proceso se reiniciaba cruzando ese
+        borde -y launchd lo reinicia por diseño- el correo quedaba
+        abandonado para siempre: no llegaba al tope, no generaba aviso, no
+        lo miraba nadie. Medido: 10 vueltas del ciclo con un pendiente
+        fuera de la ventana, cero intentos de escritura.
+
+        Primero los pendientes y después los entrantes, para que un correo
+        que falla recién ahora no se reintente dos veces en la misma
+        vuelta y queme dos intentos de una.
+        """
+        for situacion, seguir in (("pendiente_de_borrar",
+                                   self._terminar_de_archivar),
+                                  ("pendiente_de_archivar", self._archivar)):
+            for fila in memoria.pendientes(self.cx, situacion):
+                if fila["intentos"] >= INTENTOS_MAXIMOS:
+                    # Se agotaron los intentos: no se toca más la casilla,
+                    # lo único que falta es que el aviso salga.
+                    self._avisar_la_falla(fila)
+                else:
+                    seguir(fila)
 
     def revisar_casilla(self):
         """Trae lo nuevo, lo clasifica, archiva el ruido y avisa lo de JP.
@@ -253,6 +303,7 @@ class Secretaria:
         se archiva algo que no se pudo clasificar con confianza.
         """
         from datetime import date, timedelta
+        self._atender_pendientes()
         entrantes = correo.traer_nuevos(date.today() - timedelta(days=1))
         sistema = clasificador.prompt_sistema()
         direcciones, dominios = reglas.remitentes_ruido()
@@ -262,27 +313,13 @@ class Secretaria:
             identidad = correo.identidad(c)
             situacion_previa = memoria.situacion(self.cx, identidad)
 
-            if situacion_previa in ("pendiente_de_archivar",
-                                    "pendiente_de_borrar"):
-                # Ya se decidió RUIDO en un ciclo anterior; lo único que
-                # falló fue la escritura. Se reintenta sólo esa parte, sin
-                # volver a consultar al modelo -no hay nada nuevo que
-                # decidir- y sin contarlo en `nuevos`, porque no es un
-                # correo nuevo. Cuál de las dos situaciones sea decide
-                # QUÉ se reintenta, y ahí está la diferencia entre
-                # archivar bien y llenar Ruido de duplicados: si el COPY
-                # ya se había confirmado, se reintenta sólo el borrado.
-                c["message_id"] = identidad
-                if situacion_previa == "pendiente_de_borrar":
-                    self._terminar_de_archivar(c)
-                else:
-                    self._archivar(c)
-                continue
-
             if situacion_previa is not None:
-                # Ya procesado y resuelto: si el proceso se cayó y
-                # volvió, no hay que avisarle a JP dos veces por el mismo
-                # correo.
+                # Ya procesado: si el proceso se cayó y volvió, no hay que
+                # avisarle a JP dos veces por el mismo correo. Los que
+                # quedaron a medio archivar tampoco se retoman desde acá:
+                # de eso se ocupa _atender_pendientes() leyendo la base,
+                # que no depende de que el correo siga cayendo dentro de
+                # la ventana de búsqueda.
                 continue
 
             c["message_id"] = identidad
@@ -386,8 +423,12 @@ class Secretaria:
                  f"¿Qué correspondía?")
         self.enviar(texto, bot.teclado(1, tanda))
 
-    def avisar_que_no_se_pudo_archivar(self, c, e):
+    def avisar_que_no_se_pudo_archivar(self, c, falla, duplicado=False):
         """Le avisa a JP que un correo se quedó sin intentos.
+
+        Devuelve si el mensaje salió de verdad. Quien llama lo usa para
+        decidir si el correo puede pasar a terminal: un aviso que no llegó
+        no cierra nada.
 
         Va sin botones y sin chequear en_horario(): no es una decisión
         que JP tenga que tomar en el momento ni un correo más para
@@ -397,27 +438,49 @@ class Secretaria:
         pueda encontrarlo en la bandeja sin buscar en ningún log, y qué
         falló para que se entienda si es cosa del servidor o de la
         casilla.
+
+        `duplicado` cambia la última línea, y no es un detalle: cuando la
+        copia ya está hecha y lo que falló fue el borrado, el correo está
+        en la bandeja Y en Ruido. Decirle "quedó en tu bandeja, sin
+        archivar" -como decía siempre- lo manda a archivarlo de nuevo y a
+        quedarse con dos copias.
         """
+        donde = ("Quedó duplicado: sigue en tu bandeja y ya hay una copia"
+                 " en INBOX.Ruido." if duplicado else
+                 "Quedó en tu bandeja, sin archivar.")
         texto = (f"<b>🚨 No pude archivar un correo</b>\n"
                  f"<b>De:</b> {html.escape(str(c.get('de', ''))[:90])}\n"
                  f"<b>Asunto:</b> {html.escape(str(c.get('asunto', ''))[:120])}\n"
-                 f"<b>Falló:</b> "
-                 f"{html.escape(f'{type(e).__name__}: {e}'[:250])}\n\n"
+                 f"<b>Falló:</b> {html.escape(str(falla)[:250])}\n\n"
                  f"Lo intenté {INTENTOS_MAXIMOS} veces y dejo de "
-                 f"intentar. Quedó en tu bandeja, sin archivar.")
-        self.enviar(texto)
+                 f"intentar. {donde}")
+        return bool(self.enviar(texto))
 
     def enviar(self, texto, teclado=None):
-        """Manda a Telegram. Una falla acá no puede matar el proceso."""
+        """Manda a Telegram. Una falla acá no puede matar el proceso.
+
+        Devuelve lo que contestó Telegram, o None si no salió. Ese None
+        importa: hay un aviso -el de "no pude archivar"- que no se puede
+        dar por entregado sin mirarlo, porque es justamente el que existe
+        para que nada quede en silencio.
+        """
         try:
-            return bot.tg("sendMessage", chat_id=os.environ["TELEGRAM_CHAT_ID"],
-                          text=texto, parse_mode="HTML",
-                          reply_markup=teclado) if teclado else \
-                   bot.tg("sendMessage", chat_id=os.environ["TELEGRAM_CHAT_ID"],
-                          text=texto, parse_mode="HTML")
+            respuesta = (bot.tg("sendMessage",
+                                chat_id=os.environ["TELEGRAM_CHAT_ID"],
+                                text=texto, parse_mode="HTML",
+                                reply_markup=teclado) if teclado else
+                         bot.tg("sendMessage",
+                                chat_id=os.environ["TELEGRAM_CHAT_ID"],
+                                text=texto, parse_mode="HTML"))
         except Exception as e:
             print(f"[telegram] no pude enviar: {type(e).__name__}: {e}", flush=True)
             return None
+        # Telegram puede contestar 200 con {"ok": false} -- un chat_id que
+        # no existe, el bot bloqueado. Eso no es un envío.
+        if isinstance(respuesta, dict) and not respuesta.get("ok", True):
+            print(f"[telegram] rechazado: {str(respuesta)[:200]}", flush=True)
+            return None
+        return respuesta
 
     def mandar_resumen(self, momento):
         raise NotImplementedError("tarea 9")
