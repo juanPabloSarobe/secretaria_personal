@@ -28,10 +28,22 @@ import threading
 # copió nada todavía y hay que reintentar la mudanza entera.
 # "no_se_pudo_archivar" es el final del camino: se agotaron los intentos,
 # el correo deja de reintentarse y JP ya recibió el aviso.
+#
+# "pendiente_de_rever" y "no_se_pudo_rever" -tarea 11, ronda 1- son el
+# mismo patrón aplicado a Rever: JP ya contestó el motivo, pero
+# rever_ruido() llama a clasificador.clasificar() -hasta tres minutos de
+# red- y por eso no puede correr en el hilo que escucha (ver el hallazgo
+# CRÍTICO). El motivo se guarda en `explicacion` y la fila queda acá
+# hasta que ciclo_de_correo la retoma; si se agotan los intentos, pasa a
+# "no_se_pudo_rever" recién después de avisarle a JP -mismo orden que
+# "no_se_pudo_archivar", por la misma razón: avisar antes de dar por
+# terminal evita que un Telegram caído en ese instante se lleve el aviso
+# puesto para siempre.
 SITUACIONES = {"clasificado", "archivado", "en_resumen", "avisado",
                "cerrado", "corregido", "mostrado_sin_clasificar",
                "pendiente_de_archivar", "pendiente_de_borrar",
-               "no_se_pudo_archivar"}
+               "no_se_pudo_archivar", "pendiente_de_rever",
+               "no_se_pudo_rever"}
 
 # RLock y no Lock: alguna función de acá podría terminar llamando a otra
 # de acá (p.ej. anotar() llamaba a situacion()), y con un Lock simple eso
@@ -70,6 +82,12 @@ CREATE TABLE IF NOT EXISTS correos (
 );
 CREATE INDEX IF NOT EXISTS por_situacion ON correos(situacion);
 CREATE TABLE IF NOT EXISTS latidos (momento TEXT PRIMARY KEY);
+-- Estado chico y singular del proceso que tiene que sobrevivir un
+-- reinicio -hoy sólo self.pendiente (tarea 11, ronda 1: si el proceso se
+-- reinicia entre que JP contesta un paso de Rever/Uno es mío y el
+-- siguiente, sin esto la pregunta se pierde y el bot le contesta "no te
+-- entiendo" a algo que sí contestó).
+CREATE TABLE IF NOT EXISTS estado (clave TEXT PRIMARY KEY, valor TEXT);
 """
 
 
@@ -274,6 +292,54 @@ def corregir(cx, message_id, categoria_nueva, explicacion):
                    " actualizado = ? WHERE message_id = ?",
                    (categoria_nueva, explicacion, _ahora(), message_id))
         cx.commit()
+
+
+def preparar_rever(cx, message_id, explicacion):
+    """Deja anotado el motivo que JP acaba de contestar para un Rever, y
+    pasa la fila a "pendiente_de_rever" -tarea 11, ronda 1-.
+
+    rever_ruido() hace red (clasificador.clasificar(), hasta tres minutos
+    con nvidia) y por eso no puede correr en el hilo que escucha: acá
+    sólo se guarda lo que hace falta para que ciclo_de_correo lo retome
+    en su próxima vuelta, leyéndolo de la base -no de una variable en
+    memoria, para que sobreviva a un reinicio del proceso entre que JP
+    contestó y que se ejecuta de verdad (ver memoria.pendientes())."""
+    with _CANDADO:
+        cx.execute("UPDATE correos SET explicacion = ?, situacion ="
+                   " 'pendiente_de_rever', actualizado = ? WHERE"
+                   " message_id = ?", (explicacion, _ahora(), message_id))
+        cx.commit()
+
+
+def guardar_pendiente(cx, pendiente):
+    """Persiste self.pendiente -tarea 11, ronda 1-: qué le preguntó la
+    secretaria a JP y todavía espera contestación.
+
+    Sin esto, un reinicio del proceso entre que JP contesta un paso de
+    Rever o de Uno es mío y el siguiente le hace perder la pregunta: el
+    próximo mensaje de JP -que sí contesta lo que se le pidió- cae en
+    responder_pendiente() sin nada pendiente, y el bot le miente
+    diciendo que no entiende preguntas sueltas cuando en realidad el que
+    se olvidó fue el proceso. `pendiente=None` borra lo guardado."""
+    with _CANDADO:
+        if pendiente is None:
+            cx.execute("DELETE FROM estado WHERE clave = 'pendiente'")
+        else:
+            cx.execute(
+                "INSERT INTO estado (clave, valor) VALUES ('pendiente', ?)"
+                " ON CONFLICT(clave) DO UPDATE SET valor = excluded.valor",
+                (json.dumps(pendiente, ensure_ascii=False),))
+        cx.commit()
+
+
+def cargar_pendiente(cx):
+    """Lo que quedó guardado con guardar_pendiente(), o None. Se lee al
+    construir la Secretaria, para retomar un reinicio a mitad de una
+    pregunta en vez de perderla."""
+    with _CANDADO:
+        f = cx.execute("SELECT valor FROM estado WHERE clave = 'pendiente'"
+                       ).fetchone()
+    return json.loads(f["valor"]) if f else None
 
 
 def latido(cx, momento):

@@ -48,10 +48,20 @@ class _CxMuda:
     """Reemplazo de la conexión de memoria.py para tests que no necesitan
     una base de verdad: memoria.latido() se llama al final de cada vuelta
     del ciclo de correo, y le alcanza con algo que acepte execute()/
-    commit() sin hacer nada."""
+    commit() sin hacer nada.
+
+    execute() se devuelve a sí mismo (como un cursor) para que
+    fetchone() también funcione: Secretaria.__init__ (desde la ronda 1
+    de la tarea 11) llama a memoria.cargar_pendiente(), que hace
+    exactamente esa cadena -execute(...).fetchone()- para retomar una
+    pregunta pendiente tras un reinicio. None es la respuesta correcta
+    para "no hay nada guardado", que es siempre el caso acá."""
 
     def execute(self, *a, **k):
-        pass
+        return self
+
+    def fetchone(self):
+        return None
 
     def commit(self):
         pass
