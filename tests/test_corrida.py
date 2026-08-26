@@ -389,17 +389,21 @@ class Corregir(RevisionFalsa):
         self.assertEqual(memoria.obtener(self.cx, "<2@x>")["categoria_jp"], "TUYO")
         self.assertIsNone(memoria.obtener(self.cx, "<1@x>")["categoria_jp"])
 
-    def test_despues_de_corregir_sigue_esperando_otro_numero(self):
+    def test_se_pueden_corregir_varios_de_la_misma_tanda(self):
         """Corregir uno no cierra la tanda: puede haber más de uno mal,
         y volver a tocar «Corregir» por cada uno sería un mensaje de
-        más cada vez."""
+        más cada vez. En el medio de cada corrección va el porqué (ver
+        ElPorque)."""
         r = self._hasta_pedir_numero(self._anotar("<1@x>"),
                                      self._anotar("<2@x>"))
         r.atender(self._texto("2"))
         r.atender(self._boton(r.tanda, "c", idx=2, valor="TUYO"))
+        r.atender(self._texto("me lo mandaron a mí"))
         r.atender(self._texto("1"))
         r.atender(self._boton(r.tanda, "c", idx=1, valor="ENZO"))
+        r.atender(self._texto("es una falla de unidad"))
         self.assertEqual(memoria.obtener(self.cx, "<1@x>")["categoria_jp"], "ENZO")
+        self.assertEqual(memoria.obtener(self.cx, "<2@x>")["categoria_jp"], "TUYO")
 
     def test_un_numero_que_no_existe_lo_dice_y_no_corrige_nada(self):
         r = self._hasta_pedir_numero(self._anotar("<1@x>"))
@@ -596,3 +600,108 @@ class ElTokenNoSeRepiteEntreCorridas(RevisionFalsa):
         primero = r.tanda
         r.atender(self._boton(r.tanda, "b"))
         self.assertNotEqual(r.tanda, primero)
+
+
+class ElPorque(RevisionFalsa):
+    """Lo que JP marcó a mitad de la corrida real, 2026-08-26.
+
+    Corregir sin decir por qué produce etiquetas, no reglas. "Esto era
+    TUYO" no se puede escribir en reglas.md; "cuando alguien del equipo
+    contesta derivándote a vos, es TUYO aunque haya contestado" sí. El
+    caso concreto: Natalia respondió «le reenvío esto a Juan Pablo, que
+    él te va a poder dar la respuesta» y el modelo lo leyó como "Natalia
+    ya se ocupó" → DELEGADO. Sin el porqué, esa corrección es un dato
+    suelto.
+
+    simulacro.py ya lo pedía (pedir_explicacion); la corrida no lo
+    trasladó.
+    """
+
+    def _hasta_corregir(self, *casos):
+        r = self._revision(list(casos))
+        r.arrancar()
+        r.atender(self._boton(r.tanda, "g"))
+        r.atender(self._texto("1"))
+        r.atender(self._boton(r.tanda, "c", idx=1, valor="TUYO"))
+        return r
+
+    def test_despues_de_corregir_pregunta_por_que(self):
+        self._hasta_corregir(self._anotar("<1@x>", "DELEGADO"))
+        self.assertIn("por qué", self.enviados[-1][0].lower())
+
+    def test_lo_que_contesta_queda_guardado_como_explicacion(self):
+        r = self._hasta_corregir(self._anotar("<1@x>", "DELEGADO"))
+        r.atender(self._texto("Natalia me lo derivó a mí, no lo resolvió"))
+        self.assertEqual(
+            memoria.obtener(self.cx, "<1@x>")["explicacion"],
+            "Natalia me lo derivó a mí, no lo resolvió")
+
+    def test_el_motivo_no_cambia_la_categoria_que_eligio(self):
+        r = self._hasta_corregir(self._anotar("<1@x>", "DELEGADO"))
+        r.atender(self._texto("porque me lo derivó"))
+        self.assertEqual(memoria.obtener(self.cx, "<1@x>")["categoria_jp"],
+                         "TUYO")
+
+    def test_se_puede_saltear_el_porque_sin_perder_la_correccion(self):
+        """JP no siempre tiene ganas de explicar, y obligarlo a hacerlo
+        haría que deje de corregir -- que es peor."""
+        r = self._hasta_corregir(self._anotar("<1@x>", "DELEGADO"))
+        r.atender(self._texto("-"))
+        self.assertEqual(memoria.obtener(self.cx, "<1@x>")["categoria_jp"],
+                         "TUYO")
+
+    def test_despues_del_porque_vuelve_a_esperar_otro_numero(self):
+        r = self._hasta_corregir(self._anotar("<1@x>", "DELEGADO"),
+                                 self._anotar("<2@x>", "RUIDO"))
+        r.atender(self._texto("porque sí"))
+        r.atender(self._texto("2"))
+        r.atender(self._boton(r.tanda, "c", idx=2, valor="ENZO"))
+        self.assertEqual(memoria.obtener(self.cx, "<2@x>")["categoria_jp"],
+                         "ENZO")
+
+    def test_cerrar_la_tanda_con_un_porque_pendiente_no_pierde_la_correccion(self):
+        """JP puede tocar «Está bien» sin contestar el porqué. La
+        corrección vale igual; el motivo se le pregunta en el repaso."""
+        r = self._hasta_corregir(self._anotar("<1@x>", "DELEGADO"))
+        r.atender(self._boton(r.tanda, "b"))
+        self.assertEqual(memoria.obtener(self.cx, "<1@x>")["categoria_jp"],
+                         "TUYO")
+
+
+class RepasoDeMotivos(RevisionFalsa):
+    """Las correcciones que quedaron sin porqué se preguntan al final.
+
+    Cubre las seis que JP ya había hecho antes de que existiera esta
+    pregunta, y las que saltea en el momento."""
+
+    def test_al_terminar_las_tandas_pregunta_por_las_que_no_tienen_motivo(self):
+        self._anotar("<1@x>", "DELEGADO")
+        corrida.corregir(self.cx, "<1@x>", "TUYO")
+        r = self._revision([self._anotar("<2@x>", "RUIDO")])
+        r.arrancar()
+        r.atender(self._boton(r.tanda, "b"))
+        self.assertFalse(r.termino)
+        self.assertIn("por qué", self.enviados[-1][0].lower())
+
+    def test_guarda_el_motivo_del_repaso(self):
+        self._anotar("<1@x>", "DELEGADO")
+        corrida.corregir(self.cx, "<1@x>", "TUYO")
+        r = self._revision([self._anotar("<2@x>", "RUIDO")])
+        r.arrancar()
+        r.atender(self._boton(r.tanda, "b"))
+        r.atender(self._texto("me lo derivó Natalia"))
+        self.assertEqual(memoria.obtener(self.cx, "<1@x>")["explicacion"],
+                         "me lo derivó Natalia")
+
+    def test_cuando_no_quedan_motivos_pendientes_ahi_si_termina(self):
+        r = self._revision([self._anotar("<1@x>", "RUIDO")])
+        r.arrancar()
+        r.atender(self._boton(r.tanda, "b"))
+        self.assertTrue(r.termino)
+
+    def test_lo_confirmado_sin_cambio_no_entra_al_repaso(self):
+        """Confirmar no necesita explicación: la explicación es que el
+        sistema acertó."""
+        self._anotar("<1@x>", "RUIDO")
+        corrida.confirmar(self.cx, ["<1@x>"])
+        self.assertEqual(corrida.correcciones_sin_motivo(self.cx), [])

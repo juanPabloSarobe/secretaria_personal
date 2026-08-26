@@ -199,12 +199,41 @@ def confirmar(cx, message_ids):
             memoria.corregir(cx, mid, fila["categoria"], "confirmado por JP")
 
 
+#: Lo que se anota mientras JP todavía no dijo POR QUÉ corrigió. No es
+#: decoración: es lo que permite volver a preguntárselo al final en vez
+#: de perder el motivo, que es la parte que se puede escribir en
+#: reglas.md. La etiqueta sola no genera ninguna regla.
+SIN_MOTIVO = "(todavía sin motivo)"
+
+
 def corregir(cx, message_id, categoria_nueva, explicacion=""):
     """JP dijo otra cosa. No pisa `categoria`: la comparación entre lo
     que dijo el sistema y lo que dijo JP es todo el producto de esta
     corrida."""
     memoria.corregir(cx, message_id, categoria_nueva,
-                     explicacion or "corregido por JP en la corrida")
+                     explicacion or SIN_MOTIVO)
+
+
+def anotar_motivo(cx, message_id, texto):
+    """Le pone el porqué a una corrección ya hecha, sin tocar la
+    categoría que JP eligió."""
+    fila = memoria.obtener(cx, message_id)
+    if fila:
+        memoria.corregir(cx, message_id, fila["categoria_jp"], texto)
+
+
+def correcciones_sin_motivo(cx):
+    """Las correcciones que todavía no tienen el porqué.
+
+    Sólo correcciones: confirmar no necesita explicación -- la
+    explicación es que el sistema acertó.
+    """
+    filas = cx.execute(
+        "SELECT message_id, de, asunto, categoria, categoria_jp FROM correos"
+        " WHERE categoria_jp IS NOT NULL AND categoria_jp != categoria"
+        "   AND (explicacion IS NULL OR explicacion = ?)"
+        " ORDER BY actualizado, message_id", (SIN_MOTIVO,)).fetchall()
+    return [dict(f) for f in filas]
 
 
 # ---------------------------------------------------------------- fase 3
@@ -309,6 +338,8 @@ class Revision:
         #: como N. Mismo criterio que `self.abiertos` en secretaria.py.
         self.abiertos = []
         self.esperando = None
+        #: A qué correo le está faltando el porqué, si es que a alguno.
+        self.motivo_de = None
         self.termino = False
         self._sesion = f"{os.getpid() % 1000:03d}{next(_CONTADOR) % 100:02d}"
         self._enviar = enviar or self._por_telegram
@@ -329,8 +360,7 @@ class Revision:
 
     def _mandar_actual(self):
         if self.i >= len(self.lotes):
-            self.termino = True
-            self._enviar("🏁 Eso es todo. Ya está toda la corrida revisada.")
+            self._repasar_motivos()
             return
         lote = self.lotes[self.i]
         # Un token distinto por tanda Y por corrida. Lo segundo se
@@ -342,6 +372,7 @@ class Revision:
         self.tanda = f"{self._sesion}{self.i + 1:02d}"
         self.abiertos = [c["message_id"] for c in lote]
         self.esperando = None
+        self.motivo_de = None
         texto, teclado = armar_tanda(lote, self.i + 1, len(self.lotes),
                                      self.tanda)
         self._enviar(texto, teclado)
@@ -383,6 +414,8 @@ class Revision:
                      "muestro ese correo.")
 
     def _contesto(self, texto):
+        if self.esperando == "motivo":
+            return self._guardar_motivo(texto)
         if self.esperando != "numero":
             return
         try:
@@ -396,6 +429,51 @@ class Revision:
                          f"{len(self.abiertos)}.")
             return
         self._mostrar(n)
+
+    def _pedir_motivo(self, mid, encabezado=""):
+        self.esperando = "motivo"
+        self.motivo_de = mid
+        self._enviar(f"{encabezado}\n<b>¿Por qué?</b> Contestame con un "
+                     f"audio o escribiéndolo -- de eso salen las reglas "
+                     f"nuevas. Si no vale la pena, mandá «-».")
+
+    def _guardar_motivo(self, texto):
+        mid, self.motivo_de = self.motivo_de, None
+        dicho = (texto or "").strip()
+        if mid and dicho and dicho not in ("-", "--", "."):
+            anotar_motivo(self.cx, mid, dicho)
+        if self.i >= len(self.lotes):
+            # Estamos en el repaso del final: sigue con el próximo que
+            # no tenga motivo, o termina.
+            return self._repasar_motivos()
+        self.esperando = "numero"
+        self._enviar("Anotado. Mandame otro número si hay más para "
+                     "corregir, o tocá «Está bien» arriba para cerrar "
+                     "la tanda.")
+
+    def _repasar_motivos(self):
+        """Después de la última tanda: las correcciones que quedaron sin
+        porqué se preguntan una por una.
+
+        Cubre dos casos: las que JP salteó en el momento, y las que hizo
+        antes de que la corrida supiera preguntar -- las seis de la
+        corrida real del 2026-08-26, que se corrigieron cuando este
+        circuito todavía no existía.
+        """
+        pendientes = correcciones_sin_motivo(self.cx)
+        if not pendientes:
+            self.termino = True
+            self._enviar("🏁 Eso es todo. Ya está toda la corrida revisada.")
+            return
+        f = pendientes[0]
+        quedan = (f" (quedan {len(pendientes)})" if len(pendientes) > 1 else "")
+        self._pedir_motivo(
+            f["message_id"],
+            f"📝 Volvamos sobre una corrección{quedan}:\n"
+            f"<b>De:</b> {html.escape((f['de'] or '')[:80])}\n"
+            f"<b>Asunto:</b> {html.escape((f['asunto'] or '')[:110])}\n"
+            f"Yo dije <b>{html.escape(f['categoria'] or '?')}</b> y vos "
+            f"dijiste <b>{html.escape(f['categoria_jp'] or '?')}</b>.")
 
     def _mostrar(self, n):
         fila = memoria.obtener(self.cx, self.abiertos[n - 1])
@@ -418,14 +496,15 @@ class Revision:
             return
         if not 1 <= n <= len(self.abiertos):
             return
-        corregir(self.cx, self.abiertos[n - 1], categoria)
-        # No se cierra la tanda: puede haber más de uno mal, y obligar a
-        # tocar «Corregir» de nuevo por cada uno es un mensaje de más
-        # cada vez. Se queda esperando otro número.
-        self.esperando = "numero"
-        self._enviar(f"✔️ El {n} queda como <b>{html.escape(categoria)}</b>."
-                     f" Mandame otro número si hay más, o tocá «Está bien» "
-                     f"arriba para cerrar la tanda.")
+        mid = self.abiertos[n - 1]
+        corregir(self.cx, mid, categoria)
+        # Acá va la pregunta que importa. La etiqueta sola no se puede
+        # escribir en reglas.md: "esto era TUYO" no es una regla. Lo que
+        # sí lo es, es el porqué -- "cuando alguien del equipo contesta
+        # derivándote a vos, es TUYO aunque haya contestado". Se
+        # pregunta en el momento, con el correo fresco, no al final.
+        self._pedir_motivo(mid, f"✔️ El {n} queda como "
+                                f"<b>{html.escape(categoria)}</b>.")
 
 
 def informe(d):
