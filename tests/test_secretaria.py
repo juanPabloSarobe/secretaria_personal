@@ -506,6 +506,8 @@ class RevisarCasilla(unittest.TestCase):
         c = correo_falso("<4@x>", "Repetido")
         with mock.patch.object(secretaria.correo, "traer_nuevos",
                                return_value=[c, c]), \
+             mock.patch.object(self.s, "enviar",
+                               return_value={"ok": True}), \
              mock.patch.object(secretaria.clasificador, "clasificar",
                                return_value={"categoria": "TUYO",
                                              "motivo": "m", "unanime": True}) as cl:
@@ -637,7 +639,18 @@ class CodigoConvenido(unittest.TestCase):
     avisarle al bot cuando espera algo importante ("mi idea es que el bot
     me ayude a mí, no que yo le tenga que avisar cosas"). Gana sobre todo
     lo demás: sobre el ruido conocido, sobre protegido(), sobre el
-    clasificador."""
+    clasificador.
+
+    Los tres parchean `enviar` y no es decoración, por el mismo motivo
+    que test_lo_sin_clasificar_nunca_se_archiva: un correo que da TUYO
+    dispara avisar_en_el_momento(), que le escribe al Telegram DE VERDAD
+    de JP. Faltaba, y el agujero fue difícil de ver porque
+    en_horario() lo tapaba media semana: se corrieron por última vez un
+    sábado (2026-08-22), y sábado y domingo avisar_en_el_momento() ni lo
+    intenta -- weekday() < 5 -- así que pasaban en verde. El miércoles
+    siguiente, a las 11 de la mañana, los tres salían a la red y los
+    frenaba tests/sin_red.py. Un test que sólo pasa los fines de semana
+    no es un test que pasa."""
 
     def setUp(self):
         self.f = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
@@ -656,6 +669,8 @@ class CodigoConvenido(unittest.TestCase):
                                return_value=[c]), \
              mock.patch.object(secretaria.reglas, "codigos_convenidos",
                                return_value=["tal cual lo charlado"]), \
+             mock.patch.object(self.s, "enviar",
+                               return_value={"ok": True}), \
              mock.patch.object(secretaria.clasificador, "clasificar") as cl, \
              mock.patch.object(secretaria.correo, "mover_a") as mover:
             self.s.revisar_casilla()
@@ -677,6 +692,8 @@ class CodigoConvenido(unittest.TestCase):
                                return_value="remitente promo@ejemplo.com"), \
              mock.patch.object(secretaria.reglas, "protegido",
                                return_value=False), \
+             mock.patch.object(self.s, "enviar",
+                               return_value={"ok": True}), \
              mock.patch.object(secretaria.clasificador, "clasificar") as cl, \
              mock.patch.object(secretaria.correo, "mover_a") as mover:
             self.s.revisar_casilla()
@@ -694,6 +711,8 @@ class CodigoConvenido(unittest.TestCase):
                                return_value=[c]), \
              mock.patch.object(secretaria.reglas, "codigos_convenidos",
                                return_value=["tal cual lo charlado"]), \
+             mock.patch.object(self.s, "enviar",
+                               return_value={"ok": True}), \
              mock.patch.object(secretaria.clasificador, "clasificar") as cl:
             self.s.revisar_casilla()
         cl.assert_not_called()
