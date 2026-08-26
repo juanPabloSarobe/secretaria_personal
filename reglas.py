@@ -28,7 +28,8 @@ def _sin_acentos(s):
 def codigos_convenidos():
     """Frases que JP le pide a sus contactos para marcar que él pidió el correo."""
     try:
-        texto = open("codigos.md", encoding="utf-8").read()
+        with open("codigos.md", encoding="utf-8") as f:
+            texto = f.read()
     except FileNotFoundError:
         return []
     frases = []
@@ -80,7 +81,8 @@ def remitentes_ruido():
     direcciones, dominios = {}, {}
     for ruta in glob.glob("datos/simulacro-*.json"):
         try:
-            d = json.load(open(ruta, encoding="utf-8"))
+            with open(ruta, encoding="utf-8") as f:
+                d = json.load(f)
         except Exception:
             continue
         for c in d.get("casos", []):
@@ -134,7 +136,8 @@ def protegido(correo):
     dominio = dire.split("@")[1]
     for archivo in ("roster.md", "reglas.md"):
         try:
-            texto = open(archivo, encoding="utf-8").read().lower()
+            with open(archivo, encoding="utf-8") as f:
+                texto = f.read().lower()
         except FileNotFoundError:
             continue
         if dire in texto or dominio in texto:
@@ -162,7 +165,8 @@ def direcciones_externas(correo):
 
 def marcar_importante(etiqueta, direccion):
     """Agrega la dirección a roster.md. Devuelve False si ya estaba."""
-    texto = open("roster.md", encoding="utf-8").read()
+    with open("roster.md", encoding="utf-8") as f:
+        texto = f.read()
     if direccion in texto:
         return False
     hoy = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -182,10 +186,13 @@ def texto_de_conocimiento():
     estos archivos es este módulo, y porque así el clasificador no necesita
     saber en qué archivo vive cada cosa.
     """
-    partes = [open("roster.md", encoding="utf-8").read(),
-              open("reglas.md", encoding="utf-8").read()]
+    partes = []
+    for archivo in ("roster.md", "reglas.md"):
+        with open(archivo, encoding="utf-8") as f:
+            partes.append(f.read())
     try:
-        partes.append(open("codigos.md", encoding="utf-8").read())
+        with open("codigos.md", encoding="utf-8") as f:
+            partes.append(f.read())
     except FileNotFoundError:
         pass
     return "\n\n".join(partes)

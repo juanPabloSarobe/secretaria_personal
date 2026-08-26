@@ -1,0 +1,494 @@
+#!/usr/bin/env python3
+"""La corrida en frío: clasificar el atraso y mostrárselo a JP en tandas.
+
+Lo que se cuida acá es lo que hizo falta construirla: que 141 correos no
+se conviertan en 141 mensajes de Telegram, y que el número que JP
+contesta seleccione siempre el correo que vio.
+"""
+import unittest
+
+import corrida
+
+
+def caso(mid, categoria, de="alguien@x.com", asunto="Un asunto",
+         motivo="porque sí"):
+    """Un correo ya clasificado, como los que arma la fase 1."""
+    return {"message_id": mid, "de": de, "asunto": asunto,
+            "categoria": categoria, "motivo": motivo}
+
+
+class Orden(unittest.TestCase):
+    """Las tandas salen ordenadas por lo que más le importa a JP, no por
+    fecha: si abandona la revisión a la mitad, lo que alcanzó a mirar
+    tiene que ser lo que más valía."""
+
+    def test_lo_tuyo_va_primero_y_el_ruido_al_final(self):
+        mezclado = [caso("<1@x>", "RUIDO"), caso("<2@x>", "DELEGADO"),
+                    caso("<3@x>", "TUYO")]
+        self.assertEqual(
+            [c["categoria"] for c in corrida.ordenar_para_revisar(mezclado)],
+            ["TUYO", "DELEGADO", "RUIDO"])
+
+    def test_lo_que_no_supo_clasificar_va_arriba_con_lo_tuyo(self):
+        """DUDA y ERROR son los casos que más valen para medir: son
+        exactamente donde el clasificador no llegó solo."""
+        mezclado = [caso("<1@x>", "RUIDO"), caso("<2@x>", "DUDA"),
+                    caso("<3@x>", "DELEGADO"), caso("<4@x>", "ERROR")]
+        salida = [c["categoria"] for c in corrida.ordenar_para_revisar(mezclado)]
+        self.assertEqual(salida[:2], ["DUDA", "ERROR"])
+
+    def test_una_categoria_desconocida_no_se_pierde(self):
+        """Si el modelo devuelve algo fuera del orden conocido, va al
+        final pero VA: perder un caso en el ordenamiento sería la falla
+        silenciosa de siempre."""
+        salida = corrida.ordenar_para_revisar(
+            [caso("<1@x>", "TUYO"), caso("<2@x>", "MARCIANO")])
+        self.assertEqual(len(salida), 2)
+        self.assertEqual(salida[-1]["categoria"], "MARCIANO")
+
+    def test_dentro_de_una_categoria_se_respeta_el_orden_de_llegada(self):
+        entrada = [caso("<1@x>", "TUYO"), caso("<2@x>", "TUYO"),
+                   caso("<3@x>", "TUYO")]
+        self.assertEqual([c["message_id"]
+                          for c in corrida.ordenar_para_revisar(entrada)],
+                         ["<1@x>", "<2@x>", "<3@x>"])
+
+
+class Tandas(unittest.TestCase):
+    """141 correos son ~12 mensajes, no 141. Ése es el punto entero."""
+
+    def test_ciento_cuarenta_y_uno_entran_en_doce_tandas(self):
+        lotes = corrida.partir_en_tandas(
+            [caso(f"<{n}@x>", "RUIDO") for n in range(141)])
+        self.assertEqual(len(lotes), 12)
+        self.assertEqual(sum(len(l) for l in lotes), 141)
+
+    def test_ninguna_tanda_pasa_el_tamano(self):
+        lotes = corrida.partir_en_tandas(
+            [caso(f"<{n}@x>", "RUIDO") for n in range(141)])
+        self.assertTrue(all(len(l) <= corrida.TAMANO_TANDA for l in lotes))
+
+    def test_sin_correos_no_hay_tandas(self):
+        """Cero tandas, no una tanda vacía: una tanda sin correos detrás
+        es un botón que no cierra nada."""
+        self.assertEqual(corrida.partir_en_tandas([]), [])
+
+    def test_no_se_pierde_ni_se_repite_ningun_correo(self):
+        entrada = [caso(f"<{n}@x>", "RUIDO") for n in range(141)]
+        salieron = [c["message_id"] for l in corrida.partir_en_tandas(entrada)
+                    for c in l]
+        self.assertEqual(salieron, [c["message_id"] for c in entrada])
+
+
+class ArmarTanda(unittest.TestCase):
+    def test_las_lineas_se_numeran_desde_uno(self):
+        texto, _ = corrida.armar_tanda(
+            [caso("<1@x>", "TUYO", de="ana@x.com"),
+             caso("<2@x>", "TUYO", de="beto@x.com")], 1, 3, "0007")
+        self.assertIn("1. ana@x.com", texto)
+        self.assertIn("2. beto@x.com", texto)
+
+    def test_cada_linea_dice_que_categoria_le_puso_y_por_que(self):
+        """Sin el motivo, JP no puede corregir nada: vería una etiqueta
+        sin la razón que la explica."""
+        texto, _ = corrida.armar_tanda(
+            [caso("<1@x>", "ENZO", motivo="reporta falla de unidad")],
+            1, 1, "0007")
+        self.assertIn("ENZO", texto)
+        self.assertIn("reporta falla de unidad", texto)
+
+    def test_dice_en_que_tanda_va_de_cuantas(self):
+        texto, _ = corrida.armar_tanda([caso("<1@x>", "TUYO")], 3, 12, "0007")
+        self.assertIn("3", texto)
+        self.assertIn("12", texto)
+
+    def test_los_dos_botones_llevan_el_token_de_esta_tanda(self):
+        """Sin el token, el botón 'Está bien' de una tanda vieja cerraría
+        la tanda nueva -- toda tanda numera desde 1."""
+        _, teclado = corrida.armar_tanda([caso("<1@x>", "TUYO")], 1, 1, "0007")
+        datos = [b["callback_data"] for fila in teclado["inline_keyboard"]
+                 for b in fila]
+        self.assertEqual(len(datos), 2)
+        self.assertTrue(all("0007" in d for d in datos), datos)
+
+    def test_un_lote_grande_se_recorta_avisando_nunca_en_silencio(self):
+        """Mismo criterio que armar_resumen_de_ruido: Telegram rechaza el
+        mensaje entero pasado el límite, así que se recorta -- pero con
+        un aviso explícito de cuántos quedaron sin listar."""
+        lote = [caso(f"<{n}@x>", "RUIDO", de="x" * 60, asunto="y" * 90,
+                     motivo="z" * 120) for n in range(60)]
+        texto, _ = corrida.armar_tanda(lote, 1, 1, "0007")
+        self.assertLessEqual(len(texto), corrida.LIMITE_TELEGRAM)
+        self.assertIn("más", texto)
+
+
+class NoTocaLaCasilla(unittest.TestCase):
+    """La corrida es de análisis: mide el clasificador y no escribe nada.
+
+    El freno no es una variable que alguien pueda dejar prendida -- es
+    que la acción no existe en el archivo."""
+
+    def test_corrida_no_conoce_las_funciones_que_escriben(self):
+        for peligrosa in ("mover_a", "marcar_leido", "borrar_el_original",
+                          "devolver_a_bandeja"):
+            self.assertFalse(
+                hasattr(corrida, peligrosa),
+                f"corrida.py no debería poder llamar a {peligrosa}")
+
+    def test_el_texto_del_modulo_no_menciona_esas_llamadas(self):
+        """hasattr no alcanza: correo.mover_a(...) tampoco tiene que
+        aparecer, y eso no lo ve el espacio de nombres del módulo."""
+        import inspect
+        fuente = inspect.getsource(corrida)
+        for peligrosa in ("mover_a", "marcar_leido", "borrar_el_original"):
+            self.assertNotIn(f"correo.{peligrosa}", fuente)
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+import os
+import tempfile
+from unittest import mock
+
+import memoria
+
+
+def entrante(mid, de="alguien@x.com", asunto="Un asunto", cuerpo="cuerpo"):
+    """Un correo como el que deja correo.traer_nuevos()."""
+    return {"message_id": mid, "uid": "1", "uidvalidity": "9", "de": de,
+            "para": "jp@x", "cc": "", "asunto": asunto,
+            "fecha": "Mon, 11 Aug 2026 09:00:00 -0300",
+            "cuerpo": cuerpo, "adjuntos": []}
+
+
+class ConBase(unittest.TestCase):
+    def setUp(self):
+        self.f = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.cx = memoria.abrir(self.f.name)
+
+    def tearDown(self):
+        # Cerrar los dos a mano: si no, la salida de la suite se llena de
+        # ResourceWarning y deja de servir para ver lo que importa.
+        self.cx.close()
+        self.f.close()
+        os.unlink(self.f.name)
+
+
+class ClasificarTodo(ConBase):
+    """La fase 1: callada, y con la misma cadena que corre en producción."""
+
+    def test_clasifica_cada_correo_y_lo_anota(self):
+        with mock.patch.object(corrida.clasificador, "clasificar",
+                               return_value={"categoria": "RUIDO",
+                                             "motivo": "promoción"}):
+            corrida.clasificar_todo(self.cx, [entrante("<1@x>"),
+                                              entrante("<2@x>")], "sistema")
+        self.assertEqual(memoria.obtener(self.cx, "<1@x>")["categoria"], "RUIDO")
+        self.assertEqual(memoria.obtener(self.cx, "<2@x>")["categoria"], "RUIDO")
+
+    def test_no_manda_nada_por_telegram(self):
+        """La fase 1 es callada: ése es el punto. Si acá saliera un
+        mensaje por correo volveríamos a los 141."""
+        with mock.patch.object(corrida.clasificador, "clasificar",
+                               return_value={"categoria": "TUYO", "motivo": "m"}), \
+             mock.patch.object(corrida.bot, "tg") as tg:
+            corrida.clasificar_todo(self.cx, [entrante("<1@x>")], "sistema")
+        tg.assert_not_called()
+
+    def test_lo_ya_clasificado_no_se_vuelve_a_pedir_al_modelo(self):
+        """Si NVIDIA se cae a mitad de camino, la corrida se retoma sin
+        pagar de nuevo las llamadas que ya salieron."""
+        with mock.patch.object(corrida.clasificador, "clasificar",
+                               return_value={"categoria": "RUIDO", "motivo": "m"}) as cl:
+            corrida.clasificar_todo(self.cx, [entrante("<1@x>")], "sistema")
+            corrida.clasificar_todo(self.cx, [entrante("<1@x>")], "sistema")
+        self.assertEqual(cl.call_count, 1)
+
+    def test_un_correo_que_revienta_no_tira_la_corrida_entera(self):
+        """141 correos son 50 minutos de red: que el número 70 falle no
+        puede costar los 69 anteriores."""
+        with mock.patch.object(corrida.clasificador, "clasificar",
+                               side_effect=[RuntimeError("sin motores"),
+                                            {"categoria": "TUYO", "motivo": "m"}]):
+            corrida.clasificar_todo(self.cx, [entrante("<1@x>"),
+                                              entrante("<2@x>")], "sistema")
+        self.assertEqual(memoria.obtener(self.cx, "<1@x>")["categoria"], "ERROR")
+        self.assertEqual(memoria.obtener(self.cx, "<2@x>")["categoria"], "TUYO")
+
+    def test_el_codigo_convenido_gana_sin_consultar_al_modelo(self):
+        """Misma cadena que producción: si no, lo que medimos no dice
+        nada del sistema que corre."""
+        c = entrante("<1@x>", cuerpo="Va a ser tal cual lo charlado")
+        with mock.patch.object(corrida.reglas, "codigos_convenidos",
+                               return_value=["tal cual lo charlado"]), \
+             mock.patch.object(corrida.clasificador, "clasificar") as cl:
+            corrida.clasificar_todo(self.cx, [c], "sistema")
+        cl.assert_not_called()
+        self.assertEqual(memoria.obtener(self.cx, "<1@x>")["categoria"], "TUYO")
+
+
+class LoQueJpDijo(ConBase):
+    def _anotar(self, mid, categoria):
+        memoria.anotar(self.cx, entrante(mid), categoria, "porque sí")
+
+    def test_confirmar_una_tanda_deja_lo_que_dijo_el_sistema_como_correcto(self):
+        self._anotar("<1@x>", "RUIDO")
+        corrida.confirmar(self.cx, ["<1@x>"])
+        self.assertEqual(memoria.obtener(self.cx, "<1@x>")["categoria_jp"],
+                         "RUIDO")
+
+    def test_corregir_guarda_lo_de_jp_sin_pisar_lo_del_sistema(self):
+        """Pisar `categoria` perdería la comparación, que es todo lo que
+        esta corrida viene a producir."""
+        self._anotar("<1@x>", "RUIDO")
+        corrida.corregir(self.cx, "<1@x>", "TUYO")
+        fila = memoria.obtener(self.cx, "<1@x>")
+        self.assertEqual(fila["categoria"], "RUIDO")
+        self.assertEqual(fila["categoria_jp"], "TUYO")
+
+
+class ElJson(ConBase):
+    def _anotar(self, mid, categoria):
+        memoria.anotar(self.cx, entrante(mid), categoria, "porque sí")
+
+    def test_tiene_la_forma_que_lee_revisar_reglas(self):
+        self._anotar("<1@x>", "RUIDO")
+        corrida.confirmar(self.cx, ["<1@x>"])
+        d = corrida.armar_json(self.cx, "un/modelo")
+        for clave in ("fecha_utc", "modelo", "aciertos", "total", "completo",
+                      "casos"):
+            self.assertIn(clave, d)
+        caso = d["casos"][0]
+        for clave in ("de", "para", "cc", "asunto", "cuerpo", "fecha",
+                      "adjuntos", "correcto", "prediccion"):
+            self.assertIn(clave, caso)
+        self.assertIn("categoria", caso["prediccion"])
+
+    def test_lo_que_jp_no_miro_no_entra(self):
+        """Lo que nadie revisó no tiene un 'correcto'. Contarlo como
+        acierto porque el sistema dijo algo sería medir contra sí mismo:
+        el número daría lindo y no significaría nada."""
+        self._anotar("<1@x>", "RUIDO")
+        self._anotar("<2@x>", "TUYO")
+        corrida.confirmar(self.cx, ["<1@x>"])
+        d = corrida.armar_json(self.cx, "un/modelo")
+        self.assertEqual([c["message_id"] for c in d["casos"]], ["<1@x>"])
+
+    def test_cuenta_los_aciertos_contra_lo_que_dijo_jp(self):
+        self._anotar("<1@x>", "RUIDO")
+        self._anotar("<2@x>", "RUIDO")
+        corrida.confirmar(self.cx, ["<1@x>"])
+        corrida.corregir(self.cx, "<2@x>", "TUYO")
+        d = corrida.armar_json(self.cx, "un/modelo")
+        self.assertEqual((d["aciertos"], d["total"]), (1, 2))
+
+
+class RevisionFalsa(ConBase):
+    """Base para los tests de la fase 2: la Revisión con un `enviar` de
+    mentira que anota lo que habría salido, en vez de salir."""
+
+    def setUp(self):
+        super().setUp()
+        self.enviados = []
+
+        def enviar(texto, teclado=None):
+            self.enviados.append((texto, teclado))
+            return True
+
+        self.enviar = enviar
+
+    def _anotar(self, mid, categoria="RUIDO"):
+        memoria.anotar(self.cx, entrante(mid), categoria, "porque sí")
+        return {"message_id": mid, "de": "alguien@x.com",
+                "asunto": "Un asunto", "categoria": categoria,
+                "motivo": "porque sí"}
+
+    def _revision(self, *lotes):
+        return corrida.Revision(self.cx, list(lotes), enviar=self.enviar)
+
+    def _boton(self, tanda, accion, idx=0, valor="ok"):
+        return {"callback_query": {"id": "1",
+                                   "data": f"{accion}|{tanda}-{idx}|{valor}"}}
+
+    def _texto(self, t):
+        return {"message": {"text": t}}
+
+
+class UnaTandaPorVez(RevisionFalsa):
+    """El corazón del asunto: no se manda la siguiente hasta que JP
+    cerró la anterior. Si salieran todas juntas volveríamos a la
+    andanada, sólo que con menos mensajes."""
+
+    def test_arrancar_manda_una_sola_tanda(self):
+        r = self._revision([self._anotar("<1@x>")], [self._anotar("<2@x>")])
+        r.arrancar()
+        self.assertEqual(len(self.enviados), 1)
+
+    def test_la_segunda_sale_recien_cuando_se_cierra_la_primera(self):
+        r = self._revision([self._anotar("<1@x>")], [self._anotar("<2@x>")])
+        r.arrancar()
+        self.assertEqual(len(self.enviados), 1)
+        r.atender(self._boton(r.tanda, "b"))
+        self.assertEqual(len(self.enviados), 2)
+
+    def test_cuando_no_quedan_tandas_avisa_que_termino(self):
+        r = self._revision([self._anotar("<1@x>")])
+        r.arrancar()
+        r.atender(self._boton(r.tanda, "b"))
+        self.assertTrue(r.termino)
+
+
+class CerrarTanda(RevisionFalsa):
+    def test_esta_bien_da_por_correcto_todo_lo_de_la_tanda(self):
+        c1, c2 = self._anotar("<1@x>", "RUIDO"), self._anotar("<2@x>", "TUYO")
+        r = self._revision([c1, c2])
+        r.arrancar()
+        r.atender(self._boton(r.tanda, "b"))
+        self.assertEqual(memoria.obtener(self.cx, "<1@x>")["categoria_jp"], "RUIDO")
+        self.assertEqual(memoria.obtener(self.cx, "<2@x>")["categoria_jp"], "TUYO")
+
+    def test_un_boton_de_otra_tanda_no_cierra_la_de_ahora(self):
+        """Toda tanda numera desde 1: sin el token, «Está bien» de un
+        mensaje viejo cerraría el de ahora, y JP daría por revisados
+        doce correos que no vio."""
+        r = self._revision([self._anotar("<1@x>")], [self._anotar("<2@x>")])
+        r.arrancar()
+        r.atender(self._boton("9999", "b"))
+        self.assertIsNone(memoria.obtener(self.cx, "<1@x>")["categoria_jp"])
+        self.assertEqual(len(self.enviados), 1)
+
+
+class Corregir(RevisionFalsa):
+    def _hasta_pedir_numero(self, *casos):
+        r = self._revision(list(casos))
+        r.arrancar()
+        r.atender(self._boton(r.tanda, "g"))
+        return r
+
+    def test_corregir_pregunta_cual_numero(self):
+        r = self._hasta_pedir_numero(self._anotar("<1@x>"))
+        self.assertIn("número", self.enviados[-1][0].lower())
+
+    def test_el_numero_muestra_ese_correo_con_los_botones_de_categoria(self):
+        r = self._hasta_pedir_numero(self._anotar("<1@x>"),
+                                     self._anotar("<2@x>"))
+        r.atender(self._texto("2"))
+        texto, teclado = self.enviados[-1]
+        categorias = [b["text"] for fila in teclado["inline_keyboard"]
+                      for b in fila]
+        self.assertTrue(any("Ruido" in c or "RUIDO" in c.upper()
+                            for c in categorias), categorias)
+
+    def test_elegir_categoria_corrige_ese_correo_y_no_otro(self):
+        r = self._hasta_pedir_numero(self._anotar("<1@x>", "RUIDO"),
+                                     self._anotar("<2@x>", "RUIDO"))
+        r.atender(self._texto("2"))
+        r.atender(self._boton(r.tanda, "c", idx=2, valor="TUYO"))
+        self.assertEqual(memoria.obtener(self.cx, "<2@x>")["categoria_jp"], "TUYO")
+        self.assertIsNone(memoria.obtener(self.cx, "<1@x>")["categoria_jp"])
+
+    def test_despues_de_corregir_sigue_esperando_otro_numero(self):
+        """Corregir uno no cierra la tanda: puede haber más de uno mal,
+        y volver a tocar «Corregir» por cada uno sería un mensaje de
+        más cada vez."""
+        r = self._hasta_pedir_numero(self._anotar("<1@x>"),
+                                     self._anotar("<2@x>"))
+        r.atender(self._texto("2"))
+        r.atender(self._boton(r.tanda, "c", idx=2, valor="TUYO"))
+        r.atender(self._texto("1"))
+        r.atender(self._boton(r.tanda, "c", idx=1, valor="ENZO"))
+        self.assertEqual(memoria.obtener(self.cx, "<1@x>")["categoria_jp"], "ENZO")
+
+    def test_un_numero_que_no_existe_lo_dice_y_no_corrige_nada(self):
+        r = self._hasta_pedir_numero(self._anotar("<1@x>"))
+        r.atender(self._texto("7"))
+        self.assertIn("7", self.enviados[-1][0])
+        self.assertIsNone(memoria.obtener(self.cx, "<1@x>")["categoria_jp"])
+
+    def test_algo_que_no_es_un_numero_no_revienta(self):
+        r = self._hasta_pedir_numero(self._anotar("<1@x>"))
+        r.atender(self._texto("el segundo creo"))
+        self.assertIsNone(memoria.obtener(self.cx, "<1@x>")["categoria_jp"])
+
+    def test_el_numero_selecciona_bien_aunque_la_tanda_se_haya_recortado(self):
+        """Si el mensaje se recortó por espacio, el número N tiene que
+        seguir apuntando al mismo correo -- la tanda los conoce a todos
+        aunque el texto no los liste."""
+        casos = [self._anotar(f"<{n}@x>") for n in range(1, 41)]
+        r = self._revision(casos)
+        r.arrancar()
+        r.atender(self._boton(r.tanda, "g"))
+        r.atender(self._texto("40"))
+        r.atender(self._boton(r.tanda, "c", idx=40, valor="TUYO"))
+        self.assertEqual(memoria.obtener(self.cx, "<40@x>")["categoria_jp"],
+                         "TUYO")
+
+
+class Informe(unittest.TestCase):
+    """El informe es el producto de la corrida: de acá salen las reglas
+    nuevas para reglas.md. Si no dice en qué se equivocó y con quién,
+    la corrida fue un ejercicio."""
+
+    def _d(self, *casos):
+        return {"aciertos": sum(1 for c in casos
+                                if c["prediccion"]["categoria"] == c["correcto"]),
+                "total": len(casos), "casos": list(casos)}
+
+    def _caso(self, de, dijo, era):
+        return {"de": de, "asunto": "x", "correcto": era,
+                "prediccion": {"categoria": dijo, "motivo": "m"}}
+
+    def test_dice_cuantos_acerto_sobre_cuantos(self):
+        texto = corrida.informe(self._d(self._caso("a@x.com", "RUIDO", "RUIDO"),
+                                        self._caso("b@x.com", "RUIDO", "TUYO")))
+        self.assertIn("1", texto)
+        self.assertIn("2", texto)
+
+    def test_muestra_en_que_se_confunde(self):
+        """No alcanza con 'acertó 8 de 10': la regla nueva sale de saber
+        que confunde RUIDO con TUYO, que es el error caro."""
+        texto = corrida.informe(self._d(
+            self._caso("a@x.com", "RUIDO", "TUYO"),
+            self._caso("b@x.com", "RUIDO", "TUYO")))
+        self.assertIn("RUIDO", texto)
+        self.assertIn("TUYO", texto)
+        self.assertIn("2", texto)
+
+    def test_nombra_los_remitentes_que_concentran_los_errores(self):
+        """Un remitente con tres errores es una regla de reglas.md
+        esperando a que la escriban."""
+        texto = corrida.informe(self._d(
+            self._caso("repetido@x.com", "RUIDO", "TUYO"),
+            self._caso("repetido@x.com", "RUIDO", "TUYO"),
+            self._caso("suelto@x.com", "RUIDO", "TUYO")))
+        self.assertIn("repetido@x.com", texto)
+
+    def test_sin_errores_lo_dice_y_no_inventa_secciones_vacias(self):
+        texto = corrida.informe(self._d(self._caso("a@x.com", "TUYO", "TUYO")))
+        self.assertNotIn("→", texto)
+
+    def test_sin_casos_no_revienta(self):
+        self.assertIsInstance(corrida.informe(self._d()), str)
+
+
+class RetomarLaRevision(ConBase):
+    """JP revisa 3 tandas, se va a entrenar, y vuelve al día siguiente.
+    Lo ya revisado no se le muestra de nuevo."""
+
+    def test_lo_ya_dictaminado_no_vuelve_a_la_cola(self):
+        memoria.anotar(self.cx, entrante("<1@x>"), "RUIDO", "m")
+        memoria.anotar(self.cx, entrante("<2@x>"), "TUYO", "m")
+        corrida.confirmar(self.cx, ["<1@x>"])
+        self.assertEqual([c["message_id"]
+                          for c in corrida.pendientes_de_revisar(self.cx)],
+                         ["<2@x>"])
+
+    def test_vienen_con_lo_que_la_tanda_necesita_mostrar(self):
+        memoria.anotar(self.cx, entrante("<1@x>", de="ana@x.com"), "TUYO",
+                       "la nombra a JP")
+        c = corrida.pendientes_de_revisar(self.cx)[0]
+        self.assertEqual(c["de"], "ana@x.com")
+        self.assertEqual(c["categoria"], "TUYO")
+        self.assertEqual(c["motivo"], "la nombra a JP")

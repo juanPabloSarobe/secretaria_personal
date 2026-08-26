@@ -99,3 +99,43 @@ class Conocimiento(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NoDejaArchivosAbiertos(unittest.TestCase):
+    """reglas.py leía todo con open(...).read() sin cerrar.
+
+    No es cosmético: remitentes_ruido() abre CADA simulacro guardado
+    -veinte y subiendo- y ninguno se cerraba. Se notó porque la salida
+    de la suite se llenó de ResourceWarning, y una salida llena de ruido
+    es exactamente lo que este proyecto no puede permitirse: el log es
+    la única forma de ver que algo anda mal.
+    """
+
+    def _sin_avisos(self, fn):
+        """Los ResourceWarning que salgan DE reglas.py al llamar a `fn`.
+
+        Filtrar por archivo no es una tibieza: el gc.collect() barre
+        también lo que dejaron abierto otros módulos en tests
+        anteriores, y sin el filtro este test acusaba a reglas.py de
+        fugas ajenas -- pasaba solo y fallaba en la suite completa, que
+        es la peor forma de fallar.
+        """
+        import gc
+        import os.path
+        import warnings
+        with warnings.catch_warnings(record=True) as avisos:
+            warnings.simplefilter("always", ResourceWarning)
+            fn()
+            gc.collect()
+        return [a for a in avisos
+                if issubclass(a.category, ResourceWarning)
+                and os.path.basename(a.filename) == "reglas.py"]
+
+    def test_codigos_convenidos_cierra_lo_que_abre(self):
+        self.assertEqual(self._sin_avisos(reglas.codigos_convenidos), [])
+
+    def test_remitentes_ruido_cierra_lo_que_abre(self):
+        self.assertEqual(self._sin_avisos(reglas.remitentes_ruido), [])
+
+    def test_texto_de_conocimiento_cierra_lo_que_abre(self):
+        self.assertEqual(self._sin_avisos(reglas.texto_de_conocimiento), [])
