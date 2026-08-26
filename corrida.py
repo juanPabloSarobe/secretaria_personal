@@ -236,6 +236,173 @@ def correcciones_sin_motivo(cx):
     return [dict(f) for f in filas]
 
 
+# --------------------------------------------------- fase 2 bis: uno a uno
+
+#: Las categorías donde una equivocación le cuesta algo a JP. El ruido y
+#: lo que el equipo ya maneja no necesitan que las mire de a una: son el
+#: grueso y son lo que menos enseña.
+ACCIONABLES = ("TUYO", "DUDA", "ENZO", "NATALIA", "ERROR")
+
+
+def accionables(cx):
+    """Los correos que merecen una mirada de a uno.
+
+    Cuenta lo que dijo CUALQUIERA de los dos: si el sistema dijo TUYO y
+    JP dijo RUIDO, se equivocó para el lado caro y hay que entender por
+    qué; si el sistema dijo DELEGADO y JP dijo TUYO, también. Filtrar
+    sólo por la categoría del sistema perdería justo los casos que más
+    enseñan.
+    """
+    marcas = ",".join("?" * len(ACCIONABLES))
+    filas = cx.execute(
+        f"SELECT * FROM correos WHERE categoria IN ({marcas})"
+        f"   OR categoria_jp IN ({marcas})"
+        f" ORDER BY actualizado, message_id",
+        ACCIONABLES + ACCIONABLES).fetchall()
+    return [dict(f) for f in filas]
+
+
+def armar_uno(fila, n, total, sesion=""):
+    """El correo ENTERO, con todo lo que hace falta para juzgarlo.
+
+    Nace de lo que JP marcó en la corrida real del 2026-08-26: la línea
+    de la tanda no tenía fecha ni hora -- y en un hilo de ida y vuelta
+    sin eso no se sabe cuál mensaje es cuál -- y el cuerpo se recortaba
+    a 600 caracteres, así que para entender de qué se trataba había que
+    ir a la casilla. Le pasó con un correo de aspecto judicial que
+    resultó ser trucho: no quería marcarlo como error del sistema sin
+    estar seguro de que lo fuera.
+
+    Acá el correo se muestra ANTES de pedir nada, y «Está bien así» es
+    un botón más: mirar no cuesta una decisión.
+    """
+    cabecera = [
+        f"📬 <b>{n} de {total}</b>",
+        f"<b>Fecha:</b> {html.escape(fila.get('fecha') or '—')}",
+        f"<b>De:</b> {html.escape((fila.get('de') or '')[:110])}",
+        f"<b>Para:</b> {html.escape((fila.get('para') or '—')[:110])}",
+    ]
+    if fila.get("cc"):
+        cabecera.append(f"<b>CC:</b> {html.escape(fila['cc'][:110])}")
+    cabecera.append(f"<b>Asunto:</b> {html.escape((fila.get('asunto') or '')[:160])}")
+    adjuntos = fila.get("adjuntos")
+    if isinstance(adjuntos, str):
+        adjuntos = json.loads(adjuntos or "[]")
+    if adjuntos:
+        cabecera.append(f"<b>Adjuntos:</b> {html.escape(', '.join(adjuntos)[:150])}")
+
+    veredicto = [f"\nYo dije <b>{html.escape(fila.get('categoria') or '?')}</b> "
+                 f"porque <i>{html.escape((fila.get('motivo') or '—')[:200])}</i>"]
+    if fila.get("categoria_jp"):
+        veredicto.append(f"En las tandas vos dijiste "
+                         f"<b>{html.escape(fila['categoria_jp'])}</b>.")
+    veredicto.append("¿Está bien?")
+
+    fijo = "\n".join(cabecera + veredicto)
+    # Lo que sobra después de lo que nunca se recorta va al cuerpo, que
+    # es la parte que JP pidió ver entera. El margen cubre las etiquetas
+    # <pre> y el aviso de corte.
+    presupuesto = LIMITE_TELEGRAM - len(fijo) - 120
+    cuerpo = (fila.get("cuerpo") or "").strip()
+    escapado = html.escape(cuerpo)
+    if len(escapado) > presupuesto:
+        escapado = escapado[:presupuesto] + "\n…(sigue en la casilla)"
+    texto = "\n".join(cabecera + [f"\n<pre>{escapado}</pre>"] + veredicto)
+
+    filas_teclado = []
+    fila_actual = []
+    for cat in ("RUIDO", "DELEGADO", "ENZO", "NATALIA", "TUYO", "DUDA"):
+        fila_actual.append({"text": bot.CATEGORIAS[cat],
+                            "callback_data": f"c|{sesion}-{n}|{cat}"})
+        if len(fila_actual) == 2:
+            filas_teclado.append(fila_actual)
+            fila_actual = []
+    if fila_actual:
+        filas_teclado.append(fila_actual)
+    filas_teclado.append([{"text": "✅ Está bien así",
+                           "callback_data": f"b|{sesion}-{n}|ok"}])
+    return texto, {"inline_keyboard": filas_teclado}
+
+class UnoAUno:
+    """El correo completo, uno por mensaje, sobre los que valen.
+
+    Es la contracara de Revision, no su reemplazo: las tandas sirven
+    para el grueso -- 57 de ruido y 24 del equipo se confirman de a doce
+    sin perder nada --, y esto sirve para los que necesitan criterio.
+    JP lo pidió a mitad de la corrida real con el argumento que manda:
+    «lo más rico es que la secretaria se retroalimente de la respuesta,
+    no la etiqueta».
+
+    Por eso acá el porqué se pregunta SIEMPRE que JP toca una categoría,
+    incluso si es la misma que puso el sistema: elegirla a mano es decir
+    «está bien POR ESTO», y ese "esto" es lo que se escribe en
+    reglas.md. «Está bien así» es el atajo para cuando no hay nada que
+    agregar.
+    """
+
+    def __init__(self, cx, filas, enviar=None):
+        self.cx = cx
+        self.filas = list(filas)
+        self.i = 0
+        self.esperando = None
+        self.motivo_de = None
+        self.termino = False
+        self.sesion = f"{os.getpid() % 1000:03d}{next(_CONTADOR) % 100:02d}"
+        self._enviar = enviar or _por_telegram
+
+    def arrancar(self):
+        self._mandar_actual()
+
+    def _mandar_actual(self):
+        if self.i >= len(self.filas):
+            self.termino = True
+            self._enviar("🏁 Listo, terminamos con los que importaban.")
+            return
+        self.esperando = None
+        self.motivo_de = None
+        texto, teclado = armar_uno(self.filas[self.i], self.i + 1,
+                                   len(self.filas), self.sesion)
+        self._enviar(texto, teclado)
+
+    def atender(self, update):
+        if "callback_query" in update:
+            return self._boton(update["callback_query"])
+        texto = (update.get("message") or {}).get("text")
+        if texto is not None and self.esperando == "motivo":
+            return self._guardar_motivo(texto)
+
+    def _boton(self, cq):
+        partes = (cq.get("data") or "").split("|")
+        if len(partes) != 3:
+            return
+        accion, referencia, valor = partes
+        # El botón tiene que ser de ESTA sesión y de ESTE correo. Lo
+        # segundo importa tanto como lo primero: JP scrollea, y el
+        # mensaje de arriba sigue teniendo sus botones intactos.
+        if referencia != f"{self.sesion}-{self.i + 1}":
+            return
+        if accion == "b":
+            fila = self.filas[self.i]
+            confirmar(self.cx, [fila["message_id"]])
+            self.i += 1
+            self._mandar_actual()
+        elif accion == "c":
+            fila = self.filas[self.i]
+            corregir(self.cx, fila["message_id"], valor)
+            self.esperando = "motivo"
+            self.motivo_de = fila["message_id"]
+            self._enviar(f"Queda como <b>{html.escape(valor)}</b>.\n"
+                         f"<b>¿Por qué?</b> Audio o texto -- de esto salen "
+                         f"las reglas. «-» si no vale la pena.")
+
+    def _guardar_motivo(self, texto):
+        mid, self.motivo_de = self.motivo_de, None
+        dicho = (texto or "").strip()
+        if mid and dicho and dicho not in ("-", "--", "."):
+            anotar_motivo(self.cx, mid, dicho)
+        self.i += 1
+        self._mandar_actual()
+
 # ---------------------------------------------------------------- fase 3
 
 def casos_medibles(cx):
@@ -313,6 +480,16 @@ def pendientes_de_revisar(cx):
 _CONTADOR = itertools.count(1)
 
 
+def _por_telegram(texto, teclado=None):
+    """El envío de verdad. Lo comparten las dos conversaciones -- las
+    tandas y el uno a uno mandan igual."""
+    params = {"chat_id": os.environ["TELEGRAM_CHAT_ID"], "text": texto,
+              "parse_mode": "HTML"}
+    if teclado:
+        params["reply_markup"] = json.dumps(teclado)
+    return bot.tg("sendMessage", **params)
+
+
 class Revision:
     """La conversación por tandas: doce correos por mensaje, dos botones.
 
@@ -342,16 +519,7 @@ class Revision:
         self.motivo_de = None
         self.termino = False
         self._sesion = f"{os.getpid() % 1000:03d}{next(_CONTADOR) % 100:02d}"
-        self._enviar = enviar or self._por_telegram
-
-    # -- envío
-
-    def _por_telegram(self, texto, teclado=None):
-        params = {"chat_id": os.environ["TELEGRAM_CHAT_ID"], "text": texto,
-                  "parse_mode": "HTML"}
-        if teclado:
-            params["reply_markup"] = json.dumps(teclado)
-        return bot.tg("sendMessage", **params)
+        self._enviar = enviar or _por_telegram
 
     # -- el hilo de la conversación
 
@@ -606,6 +774,12 @@ def _argumentos(argv):
             opciones["revisar"] = False
         elif a == "--solo-revisar":
             opciones["clasificar"] = False
+        elif a == "--uno-a-uno":
+            # Los accionables, el correo entero, uno por mensaje. Para el
+            # grueso (ruido y equipo) están las tandas: son 81 y no
+            # necesitan que JP los mire de a uno.
+            opciones["clasificar"] = False
+            opciones["uno_a_uno"] = True
         else:
             raise SystemExit(f"No conozco la opción {a!r}.\n\n{__doc__}")
         i += 1
@@ -635,7 +809,18 @@ def main(argv=None):
         clasificar_todo(cx, entrantes, clasificador.prompt_sistema(), avance)
         print("\nClasificación terminada.")
 
-    if o["revisar"]:
+    if o["uno_a_uno"]:
+        filas = accionables(cx)
+        print(f"\n{len(filas)} accionables, uno por mensaje, con el correo "
+              f"entero. Esperando a JP (Ctrl-C para dejarlo para después).")
+        conversacion = UnoAUno(cx, filas)
+        conversacion.arrancar()
+        try:
+            escuchar(conversacion)
+        except KeyboardInterrupt:
+            print("\nCortado a mano. Lo dictaminado quedó guardado.")
+
+    elif o["revisar"]:
         pendientes = ordenar_para_revisar(pendientes_de_revisar(cx))
         lotes = partir_en_tandas(pendientes, o["tamano"])
         print(f"\nQuedan {len(pendientes)} sin revisar → {len(lotes)} tandas "

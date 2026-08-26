@@ -218,29 +218,53 @@ def adjuntos_legibles(lista):
         f", {a['kb']} KB" for a in lista)
 
 
+#: En qué orden se busca el cuerpo, de mejor a peor. text/calendar va
+#: último porque es un formato de máquina, pero tiene el SUMMARY y la
+#: descripción de la reunión: sin él, una invitación queda sin una sola
+#: palabra que clasificar.
+TIPOS_DE_CUERPO = ("text/plain", "text/html", "text/calendar")
+
+
+def _contenido(parte):
+    """El texto de una parte, o "" si no se puede leer."""
+    try:
+        return parte.get_content() or ""
+    except Exception:
+        return ""
+
+
 def texto_plano(msg):
-    """Devuelve el cuerpo legible del mensaje."""
+    """Devuelve el cuerpo legible del mensaje.
+
+    Recorre TIPOS_DE_CUERPO en orden y se queda con la primera parte que
+    tenga texto de verdad. Lo de "de verdad" no es un detalle: Outlook y
+    medio sistema de envío mandan un text/plain de dos caracteres
+    ("\r\n") al lado del text/html con el correo entero. La versión
+    anterior tomaba ese text/plain y cortaba con `break`; como "\r\n" es
+    truthy, el `if not cuerpo` que iba a buscar el HTML nunca corría, y
+    se tiraban 26 KB de correo por dos caracteres de relleno.
+
+    Medido sobre los 141 correos del atraso de agosto: 13 quedaron sin
+    cuerpo, cuatro de ellos TUYO y uno DUDA -- una cédula de embargo y
+    una invitación de ORBCOMM entre ellos. El clasificador los decidió
+    con el remitente y el asunto nada más.
+    """
     cuerpo = ""
     if msg.is_multipart():
-        for parte in msg.walk():
-            if parte.get_content_type() == "text/plain" and \
-               "attachment" not in str(parte.get("Content-Disposition", "")):
-                try:
-                    cuerpo = parte.get_content(); break
-                except Exception:
-                    pass
-        if not cuerpo:
+        for tipo in TIPOS_DE_CUERPO:
             for parte in msg.walk():
-                if parte.get_content_type() == "text/html":
-                    try:
-                        cuerpo = parte.get_content(); break
-                    except Exception:
-                        pass
+                if parte.get_content_type() != tipo:
+                    continue
+                if "attachment" in str(parte.get("Content-Disposition", "")):
+                    continue
+                texto = _contenido(parte)
+                if texto.strip():          # con texto de verdad, no relleno
+                    cuerpo = texto
+                    break
+            if cuerpo:
+                break
     else:
-        try:
-            cuerpo = msg.get_content()
-        except Exception:
-            cuerpo = ""
+        cuerpo = _contenido(msg)
     cuerpo = re.sub(r"<[^>]+>", " ", cuerpo)          # sacar etiquetas HTML
     cuerpo = html.unescape(cuerpo)
     cuerpo = re.sub(r"[ \t]+", " ", cuerpo)

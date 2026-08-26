@@ -705,3 +705,186 @@ class RepasoDeMotivos(RevisionFalsa):
         self._anotar("<1@x>", "RUIDO")
         corrida.confirmar(self.cx, ["<1@x>"])
         self.assertEqual(corrida.correcciones_sin_motivo(self.cx), [])
+
+
+class UnCorreoEntero(ConBase):
+    """El formato uno a uno, que JP pidió a mitad de la corrida real.
+
+    La línea de la tanda no alcanzaba para juzgar: sin fecha ni hora, en
+    un hilo de ida y vuelta no se sabe quién contestó qué, y el cuerpo
+    recortado a 600 caracteres obligaba a ir a la casilla para entender
+    de qué se trataba. JP lo dijo con un caso: un correo de aspecto
+    judicial que resultó ser trucho, y que tuvo que abrir en el correo
+    real para no marcar un error que quizá no lo era.
+    """
+
+    def _fila(self, mid="<1@x>", categoria="TUYO", cuerpo="cuerpo largo"):
+        c = entrante(mid, cuerpo=cuerpo)
+        memoria.anotar(self.cx, c, categoria, "la nombra a JP")
+        return memoria.obtener(self.cx, mid)
+
+    def test_trae_la_fecha_y_la_hora(self):
+        """Lo primero que faltaba: en un ida y vuelta, sin fecha no se
+        sabe cuál mensaje es cuál."""
+        texto, _ = corrida.armar_uno(self._fila(), 1, 39)
+        self.assertIn("11 Aug 2026", texto)
+        self.assertIn("09:00", texto)
+
+    def test_trae_los_destinatarios(self):
+        texto, _ = corrida.armar_uno(self._fila(), 1, 39)
+        self.assertIn("jp@x", texto)
+
+    def test_trae_el_cuerpo_entero_no_un_recorte_corto(self):
+        largo = "linea de texto. " * 150          # ~2400 caracteres
+        texto, _ = corrida.armar_uno(self._fila(cuerpo=largo), 1, 39)
+        self.assertGreater(len(texto), 2000)
+
+    def test_un_cuerpo_gigante_se_recorta_avisando(self):
+        texto, _ = corrida.armar_uno(self._fila(cuerpo="x" * 9000), 1, 39)
+        self.assertLessEqual(len(texto), corrida.LIMITE_TELEGRAM)
+        self.assertIn("…", texto)
+
+    def test_dice_que_puso_el_sistema_y_por_que(self):
+        texto, _ = corrida.armar_uno(self._fila(categoria="TUYO"), 1, 39)
+        self.assertIn("TUYO", texto)
+        self.assertIn("la nombra a JP", texto)
+
+    def test_dice_en_cual_va_de_cuantos(self):
+        texto, _ = corrida.armar_uno(self._fila(), 7, 39)
+        self.assertIn("7", texto)
+        self.assertIn("39", texto)
+
+    def test_se_puede_mirar_sin_dictaminar_nada(self):
+        """El defecto que JP marcó: «Corregir» lo obligaba a elegir una
+        categoría para poder VER el correo. Acá el correo se muestra
+        siempre, y «Está bien así» es un botón más -- mirar no cuesta
+        una decisión."""
+        _, teclado = corrida.armar_uno(self._fila(), 1, 39)
+        botones = [b["text"] for fila in teclado["inline_keyboard"] for b in fila]
+        self.assertTrue(any("bien" in b.lower() for b in botones), botones)
+
+    def test_ofrece_las_seis_categorias(self):
+        _, teclado = corrida.armar_uno(self._fila(), 1, 39)
+        datos = [b["callback_data"] for fila in teclado["inline_keyboard"]
+                 for b in fila]
+        for cat in ("RUIDO", "DELEGADO", "ENZO", "NATALIA", "TUYO", "DUDA"):
+            self.assertTrue(any(d.endswith(f"|{cat}") for d in datos), cat)
+
+
+class LosAccionables(ConBase):
+    def test_son_los_que_necesitan_criterio_de_jp(self):
+        for mid, cat in [("<1@x>", "TUYO"), ("<2@x>", "RUIDO"),
+                         ("<3@x>", "NATALIA"), ("<4@x>", "DELEGADO"),
+                         ("<5@x>", "DUDA"), ("<6@x>", "ENZO")]:
+            memoria.anotar(self.cx, entrante(mid), cat, "m")
+        self.assertEqual(
+            sorted(c["message_id"] for c in corrida.accionables(self.cx)),
+            ["<1@x>", "<3@x>", "<5@x>", "<6@x>"])
+
+    def test_entra_lo_que_jp_convirtio_en_accionable(self):
+        """El DELEGADO que JP corrigió a TUYO en la revisión por tandas:
+        el sistema no lo cree accionable, pero JP sí, y es justo el caso
+        que más enseña."""
+        memoria.anotar(self.cx, entrante("<1@x>"), "DELEGADO", "m")
+        corrida.corregir(self.cx, "<1@x>", "TUYO")
+        self.assertEqual([c["message_id"] for c in corrida.accionables(self.cx)],
+                         ["<1@x>"])
+
+    def test_no_entra_lo_que_jp_bajo_a_ruido(self):
+        """Al revés: el sistema dijo TUYO, JP dijo RUIDO. Sigue siendo
+        un caso que enseña -- se equivocó para el lado caro."""
+        memoria.anotar(self.cx, entrante("<1@x>"), "TUYO", "m")
+        corrida.corregir(self.cx, "<1@x>", "RUIDO")
+        self.assertEqual([c["message_id"] for c in corrida.accionables(self.cx)],
+                         ["<1@x>"])
+
+
+class DeAUno(RevisionFalsa):
+    """La conversación uno a uno sobre los accionables."""
+
+    def _fila(self, mid, categoria="TUYO"):
+        memoria.anotar(self.cx, entrante(mid), categoria, "la nombra a JP")
+        return memoria.obtener(self.cx, mid)
+
+    def _uno(self, *mids):
+        filas = [self._fila(m) for m in mids]
+        return corrida.UnoAUno(self.cx, filas, enviar=self.enviar)
+
+    def _cat(self, u, n, valor):
+        return {"callback_query": {"id": "1",
+                                   "data": f"c|{u.sesion}-{n}|{valor}"}}
+
+    def _ok(self, u, n):
+        return {"callback_query": {"id": "1",
+                                   "data": f"b|{u.sesion}-{n}|ok"}}
+
+    def test_manda_uno_solo_y_espera(self):
+        u = self._uno("<1@x>", "<2@x>")
+        u.arrancar()
+        self.assertEqual(len(self.enviados), 1)
+
+    def test_esta_bien_asi_lo_confirma_y_pasa_al_siguiente(self):
+        u = self._uno("<1@x>", "<2@x>")
+        u.arrancar()
+        u.atender(self._ok(u, 1))
+        self.assertEqual(memoria.obtener(self.cx, "<1@x>")["categoria_jp"],
+                         "TUYO")
+        self.assertEqual(len(self.enviados), 2)
+
+    def test_elegir_otra_categoria_corrige_y_pregunta_por_que(self):
+        u = self._uno("<1@x>")
+        u.arrancar()
+        u.atender(self._cat(u, 1, "RUIDO"))
+        self.assertEqual(memoria.obtener(self.cx, "<1@x>")["categoria_jp"],
+                         "RUIDO")
+        self.assertIn("por qué", self.enviados[-1][0].lower())
+
+    def test_el_por_que_queda_guardado_y_sigue_con_el_siguiente(self):
+        u = self._uno("<1@x>", "<2@x>")
+        u.arrancar()
+        u.atender(self._cat(u, 1, "RUIDO"))
+        u.atender(self._texto("es spam disfrazado de cédula judicial"))
+        self.assertEqual(memoria.obtener(self.cx, "<1@x>")["explicacion"],
+                         "es spam disfrazado de cédula judicial")
+        self.assertEqual(len(self.enviados), 3)
+
+    def test_confirmar_la_misma_categoria_tambien_pregunta_por_que(self):
+        """Si JP elige a mano la categoría que el sistema ya había
+        puesto, está diciendo algo más que «está bien»: está diciendo
+        «está bien POR ESTO». Ese porqué vale igual."""
+        u = self._uno("<1@x>")
+        u.arrancar()
+        u.atender(self._cat(u, 1, "TUYO"))
+        self.assertIn("por qué", self.enviados[-1][0].lower())
+
+    def test_se_puede_saltear_el_por_que(self):
+        u = self._uno("<1@x>", "<2@x>")
+        u.arrancar()
+        u.atender(self._cat(u, 1, "RUIDO"))
+        u.atender(self._texto("-"))
+        self.assertEqual(memoria.obtener(self.cx, "<1@x>")["categoria_jp"],
+                         "RUIDO")
+        self.assertEqual(len(self.enviados), 3)
+
+    def test_al_terminar_avisa(self):
+        u = self._uno("<1@x>")
+        u.arrancar()
+        u.atender(self._ok(u, 1))
+        self.assertTrue(u.termino)
+
+    def test_un_boton_de_otra_sesion_no_hace_nada(self):
+        """La misma falla que ya apareció con las tandas: sin token de
+        sesión, el botón 3 de una corrida vieja contesta por el 3 de
+        ahora."""
+        u = self._uno("<1@x>")
+        u.arrancar()
+        u.atender({"callback_query": {"id": "1", "data": "b|9999-1|ok"}})
+        self.assertIsNone(memoria.obtener(self.cx, "<1@x>")["categoria_jp"])
+
+    def test_un_boton_de_otro_correo_de_esta_sesion_tampoco(self):
+        """El 2 no puede contestar por el 1: JP scrollea, y el mensaje
+        de arriba sigue teniendo sus botones."""
+        u = self._uno("<1@x>", "<2@x>")
+        u.arrancar()
+        u.atender(self._ok(u, 2))
+        self.assertIsNone(memoria.obtener(self.cx, "<1@x>")["categoria_jp"])

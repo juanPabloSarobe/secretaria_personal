@@ -131,6 +131,61 @@ class Cuerpo(unittest.TestCase):
         self.assertNotIn("<p>", t)
 
 
+class CuerpoQueSeCaia(unittest.TestCase):
+    """Un text/plain vacío de relleno tapaba el correo entero.
+
+    Medido sobre los 141 correos del atraso de agosto: 13 (el 9%)
+    quedaron guardados SIN cuerpo, y entre ellos cuatro TUYO y un DUDA
+    -- una cédula de embargo, una invitación de ORBCOMM. O sea que el
+    clasificador estuvo decidiendo esos casos con el remitente y el
+    asunto nada más, y JP tampoco los podía juzgar sin abrir la casilla.
+
+    La causa: Outlook y medio sistema de envío mandan un text/plain de
+    dos caracteres ("\r\n") junto al text/html de verdad.
+    texto_plano() tomaba ese text/plain, cortaba con break, y como
+    "\r\n" es truthy nunca entraba al `if not cuerpo` que iba a buscar
+    el HTML. Se tiraban 26 KB de correo por dos caracteres de relleno.
+    """
+
+    def _armar(self, partes):
+        import email.message
+        msg = email.message.EmailMessage()
+        msg["Subject"] = "x"
+        msg.make_alternative()
+        for tipo, contenido in partes:
+            sub = email.message.EmailMessage()
+            sub.set_content(contenido, subtype=tipo.split("/")[1])
+            msg.attach(sub)
+        return msg
+
+    def test_un_texto_plano_de_relleno_no_tapa_el_html(self):
+        m = self._armar([("text/plain", "\r\n"),
+                         ("text/html", "<p>Cédula de embargo N° 4471</p>")])
+        self.assertIn("Cédula de embargo", correo.texto_plano(m))
+
+    def test_un_texto_plano_solo_de_espacios_tampoco(self):
+        m = self._armar([("text/plain", "   \n  \t "),
+                         ("text/html", "<p>lo que importa</p>")])
+        self.assertIn("lo que importa", correo.texto_plano(m))
+
+    def test_el_texto_plano_de_verdad_sigue_ganando(self):
+        """El arreglo no puede invertir la preferencia: cuando hay
+        texto plano de verdad, ése es el bueno."""
+        m = self._armar([("text/plain", "el plano de verdad"),
+                         ("text/html", "<p>el html</p>")])
+        self.assertIn("el plano de verdad", correo.texto_plano(m))
+
+    def test_si_el_html_tambien_esta_vacio_se_usa_el_calendario(self):
+        """El caso "Update Full Control / ORBCOMM": text/plain de dos
+        caracteres, text/html vacío, y todo el contenido en el
+        text/calendar. Es una invitación a una reunión -- justo la
+        clase de correo que JP no se puede perder."""
+        m = self._armar([("text/plain", "\r\n"), ("text/html", ""),
+                         ("text/calendar", "BEGIN:VCALENDAR\nSUMMARY:"
+                                           "Update Full Control ORBCOMM\n")])
+        self.assertIn("Update Full Control", correo.texto_plano(m))
+
+
 class Identidad(unittest.TestCase):
     def test_usa_el_message_id_cuando_existe(self):
         c = {"message_id": "<scan-002@caesistemas.com.ar>",
