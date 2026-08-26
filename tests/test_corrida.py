@@ -492,3 +492,107 @@ class RetomarLaRevision(ConBase):
         self.assertEqual(c["de"], "ana@x.com")
         self.assertEqual(c["categoria"], "TUYO")
         self.assertEqual(c["motivo"], "la nombra a JP")
+
+
+class ConfirmarNoPisaLoCorregido(RevisionFalsa):
+    """El bug que encontró JP en la primera prueba real, 2026-08-26.
+
+    Corrigió el 3 a ENZO y después tocó «Está bien» para cerrar la
+    tanda. confirmar() recorría TODOS los correos de la tanda dando por
+    buena la categoría del sistema, así que pisó la corrección recién
+    hecha: quedó DELEGADO otra vez, con explicación "confirmado por JP".
+
+    Lo caro no es perder una corrección: es que el informe salió
+    diciendo "acertó 3 de 3 (100%)". Sobre 141 correos habría borrado
+    en silencio todas las correcciones y devuelto un porcentaje
+    perfecto -- justo el número que se iba a usar para decidir si el
+    clasificador anda bien.
+
+    «Está bien» significa "el resto está bien", nunca "olvidate de lo
+    que te acabo de decir".
+    """
+
+    def test_confirmar_la_tanda_no_borra_la_correccion_de_adentro(self):
+        r = self._revision([self._anotar("<1@x>", "RUIDO"),
+                            self._anotar("<2@x>", "DELEGADO")])
+        r.arrancar()
+        r.atender(self._boton(r.tanda, "g"))
+        r.atender(self._texto("2"))
+        r.atender(self._boton(r.tanda, "c", idx=2, valor="ENZO"))
+        r.atender(self._boton(r.tanda, "b"))
+        self.assertEqual(memoria.obtener(self.cx, "<2@x>")["categoria_jp"],
+                         "ENZO")
+
+    def test_los_demas_de_la_tanda_si_quedan_confirmados(self):
+        r = self._revision([self._anotar("<1@x>", "RUIDO"),
+                            self._anotar("<2@x>", "DELEGADO")])
+        r.arrancar()
+        r.atender(self._boton(r.tanda, "g"))
+        r.atender(self._texto("2"))
+        r.atender(self._boton(r.tanda, "c", idx=2, valor="ENZO"))
+        r.atender(self._boton(r.tanda, "b"))
+        self.assertEqual(memoria.obtener(self.cx, "<1@x>")["categoria_jp"],
+                         "RUIDO")
+
+    def test_el_informe_cuenta_la_correccion_como_error_no_como_acierto(self):
+        """La consecuencia que importa: con la corrección pisada el
+        informe decía 100%."""
+        r = self._revision([self._anotar("<1@x>", "RUIDO"),
+                            self._anotar("<2@x>", "DELEGADO")])
+        r.arrancar()
+        r.atender(self._boton(r.tanda, "g"))
+        r.atender(self._texto("2"))
+        r.atender(self._boton(r.tanda, "c", idx=2, valor="ENZO"))
+        r.atender(self._boton(r.tanda, "b"))
+        d = corrida.armar_json(self.cx, "un/modelo")
+        self.assertEqual((d["aciertos"], d["total"]), (1, 2))
+
+    def test_confirmar_dos_veces_tampoco_pisa(self):
+        """Por si JP toca «Está bien» en un mensaje viejo después de
+        haber corregido en otra vuelta -- que es literalmente lo que
+        hizo."""
+        self._anotar("<1@x>", "RUIDO")
+        corrida.corregir(self.cx, "<1@x>", "TUYO")
+        corrida.confirmar(self.cx, ["<1@x>"])
+        self.assertEqual(memoria.obtener(self.cx, "<1@x>")["categoria_jp"],
+                         "TUYO")
+
+
+class ElTokenNoSeRepiteEntreCorridas(RevisionFalsa):
+    """El otro hallazgo de la prueba real del 2026-08-26.
+
+    JP scrolleó al mensaje de una corrida ANTERIOR y tocó «Está bien»
+    ahí -- y funcionó, cuando no debería. El token salía del índice del
+    lote (`f"{i+1:04d}"`), así que la tanda 1 de toda corrida se llamaba
+    "0001" y sus botones eran indistinguibles.
+
+    Es la misma falla que `bot.es_de_esta_tanda` existe para evitar, y
+    que simulacro.py ya evitaba metiendo el PID en el token. Sobre 141
+    correos el costo es concreto: tocar el botón de un mensaje viejo da
+    por revisados doce correos que JP no vio, y ésos entran al informe
+    como aciertos.
+    """
+
+    def test_dos_corridas_no_usan_el_mismo_token_para_su_primera_tanda(self):
+        a = self._revision([self._anotar("<1@x>")])
+        b = self._revision([self._anotar("<2@x>")])
+        a.arrancar()
+        b.arrancar()
+        self.assertNotEqual(a.tanda, b.tanda)
+
+    def test_el_boton_de_una_corrida_vieja_no_cierra_la_tanda_de_ahora(self):
+        vieja = self._revision([self._anotar("<1@x>")])
+        vieja.arrancar()
+        token_viejo = vieja.tanda
+
+        ahora = self._revision([self._anotar("<2@x>")])
+        ahora.arrancar()
+        ahora.atender(self._boton(token_viejo, "b"))
+        self.assertIsNone(memoria.obtener(self.cx, "<2@x>")["categoria_jp"])
+
+    def test_adentro_de_una_corrida_cada_tanda_tiene_su_token(self):
+        r = self._revision([self._anotar("<1@x>")], [self._anotar("<2@x>")])
+        r.arrancar()
+        primero = r.tanda
+        r.atender(self._boton(r.tanda, "b"))
+        self.assertNotEqual(r.tanda, primero)

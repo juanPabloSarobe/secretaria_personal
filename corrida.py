@@ -19,6 +19,7 @@ verifica (tests/test_corrida.py, NoTocaLaCasilla).
 """
 import datetime
 import html
+import itertools
 import json
 import os
 import random
@@ -181,10 +182,20 @@ def confirmar(cx, message_ids):
     medir da lo mismo cómo se pronunció -- lo que importa es que se
     pronunció. Un correo sin `categoria_jp` es uno que JP no miró, y
     ésos no entran en la medición (ver armar_json).
+
+    **Lo ya corregido no se toca.** «Está bien» quiere decir "el RESTO
+    está bien", nunca "olvidate de lo que te acabo de decir". Sin este
+    salto, corregir un correo y después cerrar la tanda -- que es la
+    secuencia normal, no un caso raro -- pisaba la corrección con la
+    categoría del sistema. Encontrado por JP en la primera prueba real
+    (2026-08-26): corrigió uno a ENZO, cerró la tanda, y el informe
+    salió diciendo "acertó 3 de 3 (100%)". Perder la corrección es
+    malo; devolver un porcentaje perfecto que la esconde es peor, porque
+    es el número con el que se decide si el clasificador anda.
     """
     for mid in message_ids:
         fila = memoria.obtener(cx, mid)
-        if fila:
+        if fila and fila["categoria_jp"] is None:
             memoria.corregir(cx, mid, fila["categoria"], "confirmado por JP")
 
 
@@ -265,6 +276,14 @@ def pendientes_de_revisar(cx):
 
 # ---------------------------------------------------------------- fase 2
 
+#: Cuántas Revisiones se armaron en este proceso. Junto con el PID le da
+#: a cada corrida un token propio (ver Revision._sesion): el contador
+#: distingue dos revisiones del mismo proceso, el PID distingue dos
+#: procesos. Sin las dos mitades, la tanda 1 de toda corrida se llamaría
+#: igual y sus botones serían intercambiables.
+_CONTADOR = itertools.count(1)
+
+
 class Revision:
     """La conversación por tandas: doce correos por mensaje, dos botones.
 
@@ -291,6 +310,7 @@ class Revision:
         self.abiertos = []
         self.esperando = None
         self.termino = False
+        self._sesion = f"{os.getpid() % 1000:03d}{next(_CONTADOR) % 100:02d}"
         self._enviar = enviar or self._por_telegram
 
     # -- envío
@@ -313,9 +333,13 @@ class Revision:
             self._enviar("🏁 Eso es todo. Ya está toda la corrida revisada.")
             return
         lote = self.lotes[self.i]
-        # Un token distinto por tanda: toda tanda numera desde 1, así que
-        # sin esto el botón de una vieja contestaría por la de ahora.
-        self.tanda = f"{self.i + 1:04d}"
+        # Un token distinto por tanda Y por corrida. Lo segundo se
+        # aprendió midiendo: con el token sacado sólo del índice
+        # (f"{i+1:04d}"), la tanda 1 de toda corrida se llamaba "0001",
+        # y JP cerró la tanda de una corrida tocando el botón del
+        # mensaje de la anterior. Doce correos dados por revisados sin
+        # que los viera, y contados como aciertos en el informe.
+        self.tanda = f"{self._sesion}{self.i + 1:02d}"
         self.abiertos = [c["message_id"] for c in lote]
         self.esperando = None
         texto, teclado = armar_tanda(lote, self.i + 1, len(self.lotes),
