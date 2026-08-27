@@ -175,6 +175,59 @@ class CuerpoQueSeCaia(unittest.TestCase):
                          ("text/html", "<p>el html</p>")])
         self.assertIn("el plano de verdad", correo.texto_plano(m))
 
+    def test_la_hoja_de_estilos_no_es_el_cuerpo_del_correo(self):
+        """Sacar las etiquetas no alcanza: <style> es una etiqueta, pero
+        lo de adentro es texto y quedaba.
+
+        Encontrado por JP el 2026-08-26, mirando en el teléfono lo que
+        le mandó la revisión uno a uno: media pantalla de
+        «.main-content h1{font-size:24px;...}». Un correo de estudio
+        jurídico trae 7.000 caracteres de los cuales 6.000 son CSS, así
+        que el recorte a 4.000 se los comía enteros -- ni JP ni el
+        clasificador llegaban a ver una palabra del mensaje.
+        """
+        m = self._armar([("text/plain", "\r\n"),
+                         ("text/html",
+                          "<html><head><style>.main-content h1{font-size:"
+                          "24px;color:rgb(0,0,0);}</style></head><body>"
+                          "<p>Cédula de ejecución de embargo</p></body></html>")])
+        t = correo.texto_plano(m)
+        self.assertIn("Cédula de ejecución", t)
+        self.assertNotIn("font-size", t)
+        self.assertNotIn("main-content", t)
+
+    def test_el_relleno_invisible_no_ocupa_lugar(self):
+        """Los mailers meten cientos de caracteres de ancho cero para
+        estirar el texto de vista previa. No se ven, pero cuentan para
+        el recorte a 4.000 y para el prompt del modelo: en la cédula de
+        R2R eran una fila entera antes de la primera palabra."""
+        m = self._armar([("text/plain", "\r\n"),
+                         ("text/html", "<p>" + "\u200c " * 200 +
+                                       "el mensaje de verdad</p>")])
+        t = correo.texto_plano(m)
+        self.assertIn("el mensaje de verdad", t)
+        self.assertLess(len(t), 60)
+
+    def test_el_javascript_tampoco(self):
+        m = self._armar([("text/plain", "\r\n"),
+                         ("text/html",
+                          "<html><body><script>var x = 1; rastrear();</script>"
+                          "<p>el mensaje</p></body></html>")])
+        t = correo.texto_plano(m)
+        self.assertIn("el mensaje", t)
+        self.assertNotIn("rastrear", t)
+
+    def test_los_comentarios_de_html_tampoco(self):
+        """Outlook mete condicionales <!--[if mso]> con hojas de estilo
+        enteras adentro."""
+        m = self._armar([("text/plain", "\r\n"),
+                         ("text/html",
+                          "<!--[if mso]><style>td{font-family:Arial;}</style>"
+                          "<![endif]--><p>el mensaje</p>")])
+        t = correo.texto_plano(m)
+        self.assertIn("el mensaje", t)
+        self.assertNotIn("font-family", t)
+
     def test_si_el_html_tambien_esta_vacio_se_usa_el_calendario(self):
         """El caso "Update Full Control / ORBCOMM": text/plain de dos
         caracteres, text/html vacío, y todo el contenido en el

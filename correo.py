@@ -265,8 +265,24 @@ def texto_plano(msg):
                 break
     else:
         cuerpo = _contenido(msg)
-    cuerpo = re.sub(r"<[^>]+>", " ", cuerpo)          # sacar etiquetas HTML
+    # Primero lo que NO es texto del correo aunque lo parezca. Sacar
+    # sólo las etiquetas no alcanza: <style> es una etiqueta, pero lo de
+    # adentro es texto y quedaba. Un correo de estudio jurídico trae
+    # 7.000 caracteres de los cuales 6.000 son CSS, y como después se
+    # recorta a 4.000, el mensaje real no entraba: ni JP ni el
+    # clasificador llegaban a ver una palabra. Los comentarios van
+    # también porque Outlook mete condicionales <!--[if mso]> con hojas
+    # de estilo enteras adentro.
+    cuerpo = re.sub(r"(?is)<(script|style|head)\b[^>]*>.*?</\1\s*>", " ", cuerpo)
+    cuerpo = re.sub(r"(?s)<!--.*?-->", " ", cuerpo)
+    cuerpo = re.sub(r"<[^>]+>", " ", cuerpo)          # ahora sí, las etiquetas
     cuerpo = html.unescape(cuerpo)
+    # Relleno invisible: los mailers meten cientos de caracteres de
+    # ancho cero para estirar el texto de vista previa del cliente. No
+    # se ven, pero cuentan para el recorte a 4.000 y para el prompt del
+    # modelo -- en la cédula de R2R eran una fila entera antes de la
+    # primera palabra del mensaje.
+    cuerpo = re.sub(r"[\u200b-\u200d\u2060\ufeff\u00ad\u034f]", "", cuerpo)
     cuerpo = re.sub(r"[ \t]+", " ", cuerpo)
     cuerpo = re.sub(r"\n\s*\n+", "\n", cuerpo)
     return cuerpo.strip()
