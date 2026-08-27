@@ -744,10 +744,34 @@ class UnCorreoEntero(ConBase):
         self.assertLessEqual(len(texto), corrida.LIMITE_TELEGRAM)
         self.assertIn("…", texto)
 
+    def test_los_adjuntos_se_muestran_legibles(self):
+        """correo.adjuntos() devuelve diccionarios (nombre, tipo, kb),
+        no textos. Juntarlos con ', '.join() reventaba con TypeError en
+        el primer correo que trajera un adjunto -- y habría reventado
+        delante de JP, en el segundo de los 36."""
+        fila = self._fila()
+        fila["adjuntos"] = [{"nombre": "viajes-agosto.xlsx",
+                             "tipo": "application/vnd.ms-excel", "kb": 42}]
+        texto, _ = corrida.armar_uno(fila, 1, 39)
+        self.assertIn("viajes-agosto.xlsx", texto)
+
+    def test_sin_adjuntos_no_aparece_la_linea(self):
+        texto, _ = corrida.armar_uno(self._fila(), 1, 39)
+        self.assertNotIn("Adjuntos", texto)
+
     def test_dice_que_puso_el_sistema_y_por_que(self):
         texto, _ = corrida.armar_uno(self._fila(categoria="TUYO"), 1, 39)
         self.assertIn("TUYO", texto)
         self.assertIn("la nombra a JP", texto)
+
+    def test_el_veredicto_va_antes_del_cuerpo_no_despues(self):
+        """En el teléfono, con un correo de 4.000 caracteres, tener la
+        pregunta al final obliga a scrollear el mail entero para saber
+        qué se está preguntando. El veredicto va arriba, con la
+        cabecera; el cuerpo abajo, para leer lo que haga falta."""
+        fila = self._fila(cuerpo="CUERPODELCORREO " * 60)
+        texto, _ = corrida.armar_uno(fila, 1, 39)
+        self.assertLess(texto.index("Yo dije"), texto.index("CUERPODELCORREO"))
 
     def test_dice_en_cual_va_de_cuantos(self):
         texto, _ = corrida.armar_uno(self._fila(), 7, 39)

@@ -289,14 +289,19 @@ def armar_uno(fila, n, total, sesion=""):
     if isinstance(adjuntos, str):
         adjuntos = json.loads(adjuntos or "[]")
     if adjuntos:
-        cabecera.append(f"<b>Adjuntos:</b> {html.escape(', '.join(adjuntos)[:150])}")
+        # correo.adjuntos() devuelve diccionarios (nombre, tipo, kb), no
+        # textos: hay una función que los formatea y es la que usa el
+        # resto del sistema. Juntarlos a mano con ', '.join() reventaba
+        # con TypeError en el primer correo que trajera un adjunto.
+        cabecera.append("<b>Adjuntos:</b>\n"
+                        + html.escape(correo.adjuntos_legibles(adjuntos)[:300]))
 
     veredicto = [f"\nYo dije <b>{html.escape(fila.get('categoria') or '?')}</b> "
                  f"porque <i>{html.escape((fila.get('motivo') or '—')[:200])}</i>"]
     if fila.get("categoria_jp"):
         veredicto.append(f"En las tandas vos dijiste "
                          f"<b>{html.escape(fila['categoria_jp'])}</b>.")
-    veredicto.append("¿Está bien?")
+    veredicto.append("¿Está bien? El correo, abajo:")
 
     fijo = "\n".join(cabecera + veredicto)
     # Lo que sobra después de lo que nunca se recorta va al cuerpo, que
@@ -307,7 +312,10 @@ def armar_uno(fila, n, total, sesion=""):
     escapado = html.escape(cuerpo)
     if len(escapado) > presupuesto:
         escapado = escapado[:presupuesto] + "\n…(sigue en la casilla)"
-    texto = "\n".join(cabecera + [f"\n<pre>{escapado}</pre>"] + veredicto)
+    # El veredicto va ARRIBA, entre la cabecera y el cuerpo. En el
+    # teléfono, con un correo de 4.000 caracteres, tenerlo al final
+    # obliga a scrollear el mail entero para saber qué se pregunta.
+    texto = "\n".join(cabecera + veredicto + [f"\n<pre>{escapado}</pre>"])
 
     filas_teclado = []
     fila_actual = []
