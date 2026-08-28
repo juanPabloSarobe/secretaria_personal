@@ -20,8 +20,8 @@
     "ollama": {
       "url": "OLLAMA_BASE_URL",
       "clave": "OLLAMA_API_KEY",
-      "modelo": "qwen2.5:14b",
-      "motivo": "Sacado el 2026-08-12 a pedido de JP: la Mac no puede tener dos modelos cargados y lo necesita para otro proyecto. Se vuelve a habilitar moviendo esta entrada a catalogo."
+      "modelo": "qwen2.5vl:7b",
+      "motivo": "2026-08-28: probado y descartado como respaldo. Es el unico modelo instalado en esta Mac (qwen2.5vl:7b, de vision, 7B) porque JP pidio no bajar ninguno. Traga el prompt de 6.500 tokens y contesta en 6s -tres veces mas rapido que nvidia-, pero medido contra los casos que JP dictamino rompio 11 de los primeros 14, y casi todos hacia RUIDO: TUYO y NATALIA que el clasificador bueno acertaba, este los manda al tacho. Como RUIDO unanime se archiva solo, un respaldo asi es peor que no tener respaldo. Se vuelve a evaluar con un modelo de texto de 14B o mas."
     }
   }
 }

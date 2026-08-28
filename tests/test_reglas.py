@@ -101,6 +101,50 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class LasCorridasTambienEnsenan(unittest.TestCase):
+    """remitentes_ruido() sólo miraba datos/simulacro-*.json.
+
+    Las corridas (corrida.py, desde el 2026-08-26) producen el mismo
+    formato y son hoy el set etiquetado más grande y más fresco -- 141
+    correos del atraso de agosto contra los 133 de todos los simulacros
+    juntos. Con el glob viejo eran invisibles: JP etiquetaba y el
+    sistema no se enteraba, que es justo el circuito que pidió cerrar
+    ("lo más rico es que la secretaria se retroalimente de la
+    respuesta").
+    """
+
+    def _con_archivos(self, nombres):
+        import json
+        import os
+        import tempfile
+        caso = {"de": "promo@ejemplo.com", "correcto": "RUIDO"}
+        d = tempfile.mkdtemp()
+        os.mkdir(os.path.join(d, "datos"))
+        for n in nombres:
+            with open(os.path.join(d, "datos", n), "w", encoding="utf-8") as f:
+                json.dump({"casos": [caso, caso]}, f)
+        anterior = os.getcwd()
+        os.chdir(d)
+        try:
+            return reglas.remitentes_ruido()
+        finally:
+            os.chdir(anterior)
+
+    def test_una_corrida_cuenta_igual_que_un_simulacro(self):
+        direcciones, _ = self._con_archivos(["corrida-20260811.json"])
+        self.assertIn("promo@ejemplo.com", direcciones)
+
+    def test_los_simulacros_siguen_contando(self):
+        direcciones, _ = self._con_archivos(["simulacro-20260808-222124.json"])
+        self.assertIn("promo@ejemplo.com", direcciones)
+
+    def test_no_se_lee_cualquier_json_que_ande_dando_vueltas(self):
+        """datos/ tiene también candidatos-*.json, que son otra cosa:
+        no llevan el dictamen de JP."""
+        direcciones, _ = self._con_archivos(["candidatos-20260812-202429.json"])
+        self.assertNotIn("promo@ejemplo.com", direcciones)
+
+
 class NoDejaArchivosAbiertos(unittest.TestCase):
     """reglas.py leía todo con open(...).read() sin cerrar.
 

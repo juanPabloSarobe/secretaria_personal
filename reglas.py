@@ -70,6 +70,22 @@ MARCAS_PARA_AUTOMATIZAR = 2
 MUESTREO_CONTROL = 4
 
 
+#: De dónde salen los casos que JP ya dictaminó. Son dos formatos con
+#: la misma forma: los simulacros (uno por correo, por Telegram) y las
+#: corridas (en frío y por tandas, desde 2026-08-26). Los dos guardan
+#: "casos" con "de" y "correcto", que es todo lo que se lee acá. NO
+#: entra candidatos-*.json, que es otra cosa: no lleva el dictamen.
+ARCHIVOS_ETIQUETADOS = ("datos/simulacro-*.json", "datos/corrida-*.json")
+
+
+def _etiquetados():
+    """Todos los archivos con casos dictaminados por JP, sin repetir."""
+    rutas = []
+    for patron in ARCHIVOS_ETIQUETADOS:
+        rutas += glob.glob(patron)
+    return sorted(set(rutas))
+
+
 def remitentes_ruido():
     """Remitentes y dominios que JP marcó siempre como RUIDO.
 
@@ -79,7 +95,7 @@ def remitentes_ruido():
     suyos.
     """
     direcciones, dominios = {}, {}
-    for ruta in glob.glob("datos/simulacro-*.json"):
+    for ruta in _etiquetados():
         try:
             with open(ruta, encoding="utf-8") as f:
                 d = json.load(f)
