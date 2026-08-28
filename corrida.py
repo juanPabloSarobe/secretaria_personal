@@ -71,17 +71,32 @@ def partir_en_tandas(correos, tamano=TAMANO_TANDA):
     return [correos[i:i + tamano] for i in range(0, len(correos), tamano)]
 
 
-def _linea(n, c):
-    """Una entrada de la lista numerada: quién, sobre qué, y qué le puso
-    el clasificador con su motivo.
+def _linea(n, c, espiar=0):
+    """Una entrada de la lista numerada.
 
-    El motivo no es adorno: sin él JP ve una etiqueta sin la razón que
-    la explica, y no puede decidir si corregirla.
+    Lleva cuatro cosas y las cuatro hicieron falta: quién, sobre qué,
+    CUÁNDO -con la antigüedad al lado, que sin eso un correo de hoy y
+    uno de la semana pasada se leen igual-, qué le puso el clasificador
+    y por qué, y un pedazo del cuerpo para poder entenderlo sin ir a
+    abrir la casilla.
+
+    `espiar` es cuántos caracteres de cuerpo entran; lo calcula
+    armar_tanda repartiendo lo que sobra del mensaje entre los correos
+    del lote, así el recorte cae siempre acá y nunca sobre la lista
+    -un correo que no se lista es un número que JP no puede corregir-.
     """
-    return (f"  {n}. {html.escape((c.get('de') or '')[:34])} — "
-            f"{html.escape((c.get('asunto') or '')[:44])}\n"
-            f"     → <b>{html.escape(c.get('categoria') or '?')}</b> · "
-            f"<i>{html.escape((c.get('motivo') or '')[:70])}</i>")
+    partes = [f"  {n}. {html.escape((c.get('de') or '')[:32])} — "
+              f"{html.escape((c.get('asunto') or '')[:42])}",
+              f"     <i>{html.escape(correo.fecha_legible(c.get('fecha') or ''))}</i>",
+              f"     → <b>{html.escape(c.get('categoria') or '?')}</b> · "
+              f"<i>{html.escape((c.get('motivo') or '')[:64])}</i>"]
+    cuerpo = " ".join((c.get("cuerpo") or "").split())
+    if espiar > 0 and cuerpo:
+        recorte = cuerpo[:espiar]
+        if len(cuerpo) > espiar:
+            recorte += "…"
+        partes.append(f"     «{html.escape(recorte)}»")
+    return "\n".join(partes)
 
 
 def armar_tanda(lote, n, total, tanda):
@@ -93,7 +108,16 @@ def armar_tanda(lote, n, total, tanda):
     """
     cabecera = (f"📋 <b>Tanda {n} de {total}</b> — {len(lote)} correos.\n"
                 f"Si alguno está mal clasificado, tocá «Corregir».")
-    lineas = [_linea(i, c) for i, c in enumerate(lote, 1)]
+
+    # Cuánto cuerpo se puede espiar de cada uno: lo que sobre del
+    # mensaje, repartido en partes iguales. Se calcula con las líneas
+    # SIN cuerpo, que son las que no se pueden recortar, así el ajuste
+    # cae siempre sobre lo espiado y la lista queda entera.
+    sin_cuerpo = [_linea(i, c) for i, c in enumerate(lote, 1)]
+    fijo = len(cabecera) + sum(len(x) + 1 for x in sin_cuerpo)
+    espiar = max(0, min(220, (LIMITE_TELEGRAM - fijo - 60) // max(1, len(lote)) - 12))
+
+    lineas = [_linea(i, c, espiar) for i, c in enumerate(lote, 1)]
     texto = "\n".join([cabecera] + lineas)
 
     if len(texto) > LIMITE_TELEGRAM:
@@ -473,8 +497,9 @@ def pendientes_de_revisar(cx):
     las veces, porque son 141.
     """
     filas = cx.execute(
-        "SELECT message_id, de, asunto, categoria, motivo FROM correos"
-        " WHERE categoria_jp IS NULL ORDER BY actualizado, message_id"
+        "SELECT message_id, de, asunto, fecha, cuerpo, categoria, motivo"
+        " FROM correos WHERE categoria_jp IS NULL"
+        " ORDER BY actualizado, message_id"
     ).fetchall()
     return [dict(f) for f in filas]
 

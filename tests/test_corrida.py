@@ -961,3 +961,51 @@ class LosArgumentos(unittest.TestCase):
     def test_una_opcion_desconocida_no_arranca_nada(self):
         with self.assertRaises(SystemExit):
             corrida._argumentos(["--inventada"])
+
+
+class LaTandaTieneQueAlcanzarParaJuzgar(ConBase):
+    """Lo que JP reclamó dos veces: la línea de la tanda decía remitente
+    y asunto y nada más.
+
+    «no sé si es de hoy o de hace una semana. Además estaría bueno que
+    muestre una pequeña parte del cuerpo como para poder entender el
+    mail sin tener que buscarlo en el correo». Es el mismo reclamo que
+    ya había motivado correo.fecha_legible() -- cuyo docstring dice "JP
+    se topó con un correo del jueves anterior sin ninguna forma de
+    saberlo" -- y que la tanda no usaba.
+    """
+
+    def _caso(self, mid="<1@x>", cuerpo="El cuerpo del correo, que hay "
+                                        "que poder espiar sin ir a la casilla."):
+        memoria.anotar(self.cx, entrante(mid, cuerpo=cuerpo), "RUIDO", "promoción")
+        return corrida.pendientes_de_revisar(self.cx)[0]
+
+    def test_la_cola_trae_la_fecha_y_el_cuerpo(self):
+        c = self._caso()
+        self.assertIn("fecha", c)
+        self.assertIn("cuerpo", c)
+
+    def test_la_linea_dice_cuando_llego_y_hace_cuanto(self):
+        texto, _ = corrida.armar_tanda([self._caso()], 1, 1, "0007")
+        self.assertIn("ago", texto)          # "mar 11 ago 09:00 · hace N…"
+        self.assertIn("hace", texto)
+
+    def test_la_linea_deja_espiar_el_cuerpo(self):
+        texto, _ = corrida.armar_tanda([self._caso()], 1, 1, "0007")
+        self.assertIn("hay que poder espiar", texto)
+
+    def test_con_doce_correos_largos_no_se_omite_ninguno(self):
+        """El recorte tiene que caer sobre el cuerpo espiado, nunca
+        sobre la lista: un correo que no se lista es un número que JP no
+        puede corregir."""
+        lote = [self._caso(f"<{n}@x>", cuerpo="palabra " * 300)
+                for n in range(1, 13)]
+        texto, _ = corrida.armar_tanda(lote, 1, 7, "0007")
+        self.assertLessEqual(len(texto), corrida.LIMITE_TELEGRAM)
+        for n in range(1, 13):
+            self.assertIn(f"{n}.", texto, f"falta el número {n}")
+        self.assertNotIn("sin listar", texto)
+
+    def test_un_cuerpo_vacio_no_rompe_la_linea(self):
+        texto, _ = corrida.armar_tanda([self._caso(cuerpo="")], 1, 1, "0007")
+        self.assertIn("1.", texto)
