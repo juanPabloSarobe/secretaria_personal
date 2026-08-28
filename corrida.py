@@ -760,8 +760,15 @@ def escuchar(revision, offset=None):
 
 
 def _argumentos(argv):
+    # Todas las claves se definen ACÁ, siempre. Una opción que agregue
+    # una clave que las demás invocaciones no tienen revienta en main()
+    # con un KeyError -- y revienta recién al arrancar el programa de
+    # verdad, con JP esperando la tanda del otro lado. Ya pasó con
+    # --uno-a-uno el 2026-08-28: dejó rota la corrida completa y
+    # --solo-clasificar sin que nada lo avisara.
     opciones = {"desde": date(2026, 8, 11), "base": None, "salida": None,
-                "tamano": TAMANO_TANDA, "clasificar": True, "revisar": True}
+                "tamano": TAMANO_TANDA, "clasificar": True, "revisar": True,
+                "uno_a_uno": False}
     i = 0
     while i < len(argv):
         a = argv[i]

@@ -912,3 +912,52 @@ class DeAUno(RevisionFalsa):
         u.arrancar()
         u.atender(self._ok(u, 2))
         self.assertIsNone(memoria.obtener(self.cx, "<1@x>")["categoria_jp"])
+
+
+class LosArgumentos(unittest.TestCase):
+    """_argumentos() no tenía un solo test, y se rompió apenas se le
+    agregó una opción: --uno-a-uno seteaba una clave que el diccionario
+    de defaults no tenía, así que TODA invocación que no fuera
+    --uno-a-uno reventaba con KeyError en main(). Incluida la corrida
+    completa sin opciones.
+
+    Lo caro no es el KeyError -- es que salta recién al arrancar el
+    programa de verdad, con JP esperando la tanda del otro lado.
+    """
+
+    def test_sin_opciones_hace_las_dos_fases_y_no_el_uno_a_uno(self):
+        o = corrida._argumentos([])
+        self.assertEqual((o["clasificar"], o["revisar"], o["uno_a_uno"]),
+                         (True, True, False))
+
+    def test_solo_clasificar_no_revisa(self):
+        o = corrida._argumentos(["--solo-clasificar"])
+        self.assertEqual((o["clasificar"], o["revisar"], o["uno_a_uno"]),
+                         (True, False, False))
+
+    def test_solo_revisar_no_clasifica(self):
+        o = corrida._argumentos(["--solo-revisar"])
+        self.assertEqual((o["clasificar"], o["revisar"], o["uno_a_uno"]),
+                         (False, True, False))
+
+    def test_uno_a_uno_no_clasifica_y_no_manda_tandas(self):
+        o = corrida._argumentos(["--uno-a-uno"])
+        self.assertEqual((o["clasificar"], o["uno_a_uno"]), (False, True))
+
+    def test_toda_invocacion_define_las_mismas_claves(self):
+        """La raíz del bug: una opción que agrega una clave que las
+        demás no tienen. main() lee todas en cualquier camino."""
+        variantes = [[], ["--solo-clasificar"], ["--solo-revisar"],
+                     ["--uno-a-uno"], ["--tamano", "5"],
+                     ["--desde", "2026-08-11"]]
+        claves = [set(corrida._argumentos(v)) for v in variantes]
+        self.assertEqual(len(set(map(frozenset, claves))), 1, claves)
+
+    def test_la_fecha_define_los_nombres_de_archivo(self):
+        o = corrida._argumentos(["--desde", "2026-08-11"])
+        self.assertEqual(o["base"], "datos/corrida-20260811.db")
+        self.assertEqual(o["salida"], "datos/corrida-20260811.json")
+
+    def test_una_opcion_desconocida_no_arranca_nada(self):
+        with self.assertRaises(SystemExit):
+            corrida._argumentos(["--inventada"])
