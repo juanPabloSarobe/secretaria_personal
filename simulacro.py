@@ -1,0 +1,478 @@
+#!/usr/bin/env python3
+"""
+Simulacro de triage por Telegram.
+
+Lee los últimos N correos SIN marcarlos como leídos, los clasifica, y te
+pregunta por Telegram qué correspondía. Compara tu respuesta con la del
+clasificador y guarda todo.
+
+NO mueve correos. NO envía correos. NO modifica la casilla de ninguna forma.
+Lo único que sale hacia afuera son mensajes de Telegram para vos.
+
+Uso:  python3 simulacro.py [cantidad] [--hoy] [--motor groq|nvidia|ollama]
+"""
+import email.utils, glob, html, json, os, random, sys, time
+from datetime import datetime, timezone
+
+from bot import (CATEGORIAS, UA, es_de_esta_tanda, teclado,  # noqa: F401
+                 teclado_direcciones, tg, tg_suave, transcribir)
+from clasificador import (ESPERA_MAXIMA, ESPERA_RESPUESTA, clasificar,  # noqa: F401
+                          clasificar_una_vez, motores, prompt_sistema)
+from correo import (TIPOS_ADJUNTO, MESES_IMAP, abrir_buzon, adjuntos,  # noqa: F401
+                    adjuntos_legibles, completar_adjuntos, fecha_legible,
+                    identidad, texto_plano, traer_correos)
+from reglas import (DOMINIOS_GENERICOS, MARCAS_PARA_AUTOMATIZAR,  # noqa: F401
+                    MUESTREO_CONTROL, codigos_convenidos, direcciones_externas,
+                    es_ruido_conocido, marcar_importante, protegido,
+                    remitentes_ruido, texto_de_conocimiento, tiene_codigo)
+
+def parsear_argumentos(argv):
+    """(cantidad, motor, desde, lista) a partir de la línea de comandos.
+
+    --hoy trae los correos del día en lugar de los últimos N.
+    --lista <archivo> revisa una lista corta de explorar.py en vez de la
+    bandeja: los correos ya vienen con el texto adentro, así que ni se abre
+    el IMAP.
+    """
+    args = list(argv)
+    motor = None
+    if "--motor" in args:
+        i = args.index("--motor")
+        motor = args[i + 1] if i + 1 < len(args) else None
+        del args[i:i + 2]
+    lista = None
+    if "--lista" in args:
+        i = args.index("--lista")
+        lista = args[i + 1] if i + 1 < len(args) else None
+        del args[i:i + 2]
+    desde = None
+    if "--hoy" in args:
+        args.remove("--hoy")
+        desde = datetime.now().date()
+    return (int(args[0]) if args else 10), motor, desde, lista
+
+
+# Solo al ejecutarse como script: importado desde otra herramienta, los
+# argumentos de la línea de comandos son de ESA herramienta, no de esta.
+CANTIDAD, MOTOR, DESDE, LISTA = (parsear_argumentos(sys.argv[1:])
+                                if __name__ == "__main__"
+                                else (10, None, None, None))
+# Identifica a ESTA corrida. Los botones de Telegram siguen vivos para
+# siempre: una tanda que se cortó deja mensajes con botones "3/12" que, si se
+# tocan, la tanda siguiente acepta como respuesta a SU correo 3 —que es otro
+# correo—. El número de pregunta no alcanza para distinguirlos porque toda
+# tanda empieza en 1. Con el token, los botones viejos se rechazan solos.
+TANDA = f"{os.getpid() % 10000:04d}"
+
+
+# ------------------------------------------------------------------ Bucle interactivo
+# esperar_respuesta y pedir_explicacion no viven en bot.py: son el bucle de
+# preguntas del simulacro, y la secretaria no los usa porque escucha de otra
+# manera. Lo que hablan con Telegram directamente sí se movió (bot.tg, etc).
+def esperar_respuesta(idx, offset, msg_id, texto, direcciones):
+    """Long-polling hasta que JP elija una categoría.
+
+    En el medio puede entrar y salir del submenú de clientes importantes
+    tantas veces como quiera; solo un botón de categoría termina el ciclo.
+    """
+    marcados = []
+    while True:
+        d = tg("getUpdates", offset=offset, timeout=60, allowed_updates=["callback_query"])
+        for u in d.get("result", []):
+            offset = u["update_id"] + 1
+            cq = u.get("callback_query")
+            if not cq:
+                continue
+            if not es_de_esta_tanda(cq["data"], idx, TANDA):
+                tg_suave("answerCallbackQuery", callback_query_id=cq["id"],
+                   text="Ese botón es de otro correo, ya pasó.")
+                continue
+            partes = cq["data"].split("|")
+            accion, valor = partes[0], partes[2]
+
+            if accion == "c":                                   # categoría: termina
+                tg_suave("answerCallbackQuery", callback_query_id=cq["id"])
+                return valor, offset, marcados
+
+            if accion == "i":                                   # abrir submenú
+                tg_suave("answerCallbackQuery", callback_query_id=cq["id"])
+                if not direcciones:
+                    tg_suave("answerCallbackQuery", callback_query_id=cq["id"],
+                       text="Este correo no tiene direcciones externas.")
+                    continue
+                tg_suave("editMessageText", chat_id=os.environ["TELEGRAM_CHAT_ID"],
+                   message_id=msg_id, parse_mode="HTML",
+                   text=texto.replace("¿Qué correspondía?",
+                                      "¿Cuál de estos es el cliente importante?"),
+                   reply_markup=teclado_direcciones(idx, direcciones, TANDA))
+
+            elif accion == "d":                                 # elegir dirección
+                etiqueta, direccion = direcciones[int(valor)]
+                nuevo = marcar_importante(etiqueta, direccion)
+                tg_suave("answerCallbackQuery", callback_query_id=cq["id"],
+                   text=("⭐ Guardado: " + direccion) if nuevo else "Ya estaba en la lista")
+                marcados.append(direccion)
+                tg_suave("editMessageText", chat_id=os.environ["TELEGRAM_CHAT_ID"],
+                   message_id=msg_id, parse_mode="HTML",
+                   text=texto.replace("¿Qué correspondía?",
+                                      f"⭐ {html.escape(direccion)} marcado como importante.\n\n"
+                                      "¿Qué correspondía?"),
+                   reply_markup=teclado(idx, TANDA))
+
+            elif accion == "v":                                 # volver sin marcar
+                tg_suave("answerCallbackQuery", callback_query_id=cq["id"])
+                tg_suave("editMessageText", chat_id=os.environ["TELEGRAM_CHAT_ID"],
+                   message_id=msg_id, parse_mode="HTML", text=texto,
+                   reply_markup=teclado(idx, TANDA))
+
+
+# ------------------------------------------------------------------ Explicaciones
+def pedir_explicacion(idx, offset, esperado, dicho):
+    """Cuando diferimos, pregunta el porqué. Acepta texto o audio.
+
+    El botón dice QUÉ correspondía; solo el porqué permite escribir una regla
+    que generalice a los casos que todavía no aparecieron.
+    """
+    tg("sendMessage", chat_id=os.environ["TELEGRAM_CHAT_ID"], parse_mode="HTML", text=(
+        f"🤔 Acá diferimos: yo dije <b>{dicho}</b> y vos <b>{esperado}</b>.\n\n"
+        "¿Por qué? Contame con tus palabras — <b>texto o audio</b>, lo que te quede cómodo.\n\n"
+        "<i>Con esto escribo la regla. Sin esto solo sé que me equivoqué, "
+        "no cómo no volver a equivocarme.</i>"),
+        reply_markup={"inline_keyboard": [[
+            {"text": "⏭ Saltear", "callback_data": f"x|{TANDA}-{idx}|0"}]]})
+
+    # Tope duro: sin esto, un fallo de red mientras se procesa un audio deja la
+    # tanda esperando para siempre y a JP mirando el teléfono sin saberlo.
+    limite = time.time() + ESPERA_MAXIMA_EXPLICACION
+
+    while True:
+        if time.time() > limite:
+            tg_suave("sendMessage", chat_id=os.environ["TELEGRAM_CHAT_ID"],
+                     text="Sigo sin recibir tu explicación, así que continúo. "
+                          "Tu decisión quedó registrada igual.")
+            print("      (sin explicación tras el tiempo de espera; sigo)", flush=True)
+            return None, offset
+
+        d = tg("getUpdates", offset=offset, timeout=60,
+               allowed_updates=["message", "callback_query"])
+        for u in d.get("result", []):
+            offset = u["update_id"] + 1
+            cq = u.get("callback_query")
+            if cq:
+                tg_suave("answerCallbackQuery", callback_query_id=cq["id"])
+                if es_de_esta_tanda(cq["data"], idx, TANDA) and cq["data"].startswith("x|"):
+                    return None, offset
+                continue
+            m = u.get("message") or u.get("edited_message") or {}
+            if m.get("text"):
+                return m["text"].strip(), offset
+            if m.get("voice") or m.get("audio"):
+                nota = m.get("voice") or m.get("audio")
+                # acusar recibo ANTES de trabajar: si la transcripción tarda o
+                # falla, JP igual sabe que su audio llegó
+                tg_suave("sendMessage", chat_id=os.environ["TELEGRAM_CHAT_ID"],
+                         text="🎙 Recibí tu audio, lo estoy transcribiendo…")
+                try:
+                    texto = transcribir(nota["file_id"])
+                except Exception as e:
+                    print(f"      [audio] falló: {type(e).__name__}: {e}", flush=True)
+                    tg_suave("sendMessage", chat_id=os.environ["TELEGRAM_CHAT_ID"],
+                             text=f"No pude transcribir el audio ({type(e).__name__}). "
+                                  "¿Me lo escribís?")
+                    continue
+                tg_suave("sendMessage", chat_id=os.environ["TELEGRAM_CHAT_ID"],
+                         parse_mode="HTML",
+                         text=f"🎙 Te entendí: <i>{html.escape(texto)}</i>")
+                return texto, offset
+
+
+# ------------------------------------------------------------------ Correo
+def ids_respondidos():
+    """Correos que JP ya clasificó en tandas anteriores."""
+    vistos = set()
+    for ruta in glob.glob("datos/simulacro-*.json"):
+        try:
+            d = json.load(open(ruta, encoding="utf-8"))
+        except Exception:
+            continue
+        for c in d.get("casos", []):
+            vistos.add(identidad(c))
+    return vistos
+
+
+# Tope para que JP explique un caso. Pasado esto se sigue sin explicación:
+# el trabajo ya hecho vale más que una explicación que quizá nunca llegue.
+ESPERA_MAXIMA_EXPLICACION = 900
+
+
+# ------------------------------------------------------------------ Principal
+def recortar(s, n):
+    return s if len(s) <= n else s[:n].rstrip() + "…"
+
+
+# fecha_legible se mudó a correo.py (tarea 8): avisar_en_el_momento la
+# necesita en secretaria.py, y no tenía sentido que un módulo del proceso
+# real importara desde el script de simulacro.
+
+
+def valor_didactico(correo):
+    """Cuánto se aprende preguntando por este correo. Menor = preguntar antes.
+
+    El tanteo del barrido no decide nada —lo hizo un modelo chico y sin
+    contexto— pero sí sirve para ordenar la cola. Donde el modelo se
+    contradijo entre pasadas hay ambigüedad real, y la respuesta de JP la
+    resuelve. Donde vio rutina, lo más probable es que confirme lo que ya
+    sabemos, y eso gasta su tiempo sin enseñar nada.
+    """
+    a, b = (correo.get("tanteo") or ["", ""])[:2]
+    if a != b:
+        return 0
+    return {"DUDA": 1, "TUYO": 2, "ENZO": 2, "NATALIA": 2}.get(a, 3)
+
+
+def main():
+    assert os.environ.get("MODO_SIMULACRO", "true").lower() == "true", \
+        "MODO_SIMULACRO no está en true. Abortando por seguridad."
+
+    chat = os.environ["TELEGRAM_CHAT_ID"]
+    sistema = prompt_sistema()
+
+    cadena = motores(MOTOR)
+    modelo_en_uso = cadena[0][3]
+    print("Motores, en orden de uso: "
+          + " → ".join(f"{n} ({m})" for n, _, _, m in cadena))
+
+    # CANTIDAD son correos NUEVOS para revisar, no correos a traer. Como ya hay
+    # tandas respondidas, hay que traer de más para llegar a esa cantidad.
+    ya = ids_respondidos()
+    if LISTA:
+        # La lista corta ya trae los correos enteros: no hace falta el IMAP.
+        d = json.load(open(LISTA, encoding="utf-8"))
+        traidos = sorted(d["candidatos"], key=valor_didactico)
+        tope = CANTIDAD
+        print(f"Lista corta de {LISTA}: {len(traidos)} candidatos de "
+              f"{d['total']} barridos. Van primero los que más enseñan.")
+    elif DESDE:
+        print(f"Trayendo los correos desde {DESDE} (sin marcarlos como leídos)…")
+        traidos = traer_correos(0, DESDE)
+        tope = len(traidos)
+    else:
+        pozo = min(CANTIDAD + len(ya) + 10, 400)
+        print(f"Trayendo hasta {pozo} correos (sin marcarlos como leídos), "
+              f"para juntar {CANTIDAD} sin revisar…")
+        traidos = traer_correos(pozo)
+        tope = CANTIDAD
+
+    correos = completar_adjuntos(
+        [c for c in traidos if identidad(c) not in ya][:tope])
+    repetidos = len(traidos) - len([c for c in traidos if identidad(c) not in ya])
+    print(f"  {len(traidos)} leídos, {repetidos} ya respondidos antes, "
+          f"{len(correos)} para revisar.\n")
+    if not correos:
+        print("  No hay nada nuevo. Probá con un número mayor.")
+        return
+
+    tg("sendMessage", chat_id=chat, parse_mode="HTML", text=(
+        f"🧪 <b>Simulacro — {len(correos)} correos</b>\n\n"
+        "Te voy a mostrar uno por uno. Decime qué correspondía hacer.\n\n"
+        "<i>No te muestro mi respuesta hasta que elegís, así que no te condiciono. "
+        "Después te digo si coincidimos.</i>\n\n"
+        "⭐ Si además el remitente es un <b>cliente importante</b>, tocá ese botón "
+        "y elegí cuál de las direcciones es. Queda guardado en el roster y habilita "
+        "que te avise fuera de horario.\n\n"
+        "🤔 Cuando diferimos te voy a preguntar <b>por qué</b>. Podés contestar "
+        "escribiendo o mandando un audio.\n\n"
+        "Ahora clasifico cada correo <b>dos veces</b>, y si no me pongo de acuerdo "
+        "conmigo mismo, una tercera. Si aun así hay empate, te lo digo en vez de "
+        "elegir al azar.\n\n"
+        "No muevo ni mando nada: esto es solo lectura."))
+
+    offset, resultados, t_inicio = 0, [], time.time()
+
+    # Se guarda después de CADA respuesta, no al final. Las respuestas de JP son
+    # trabajo manual irrecuperable: si el proceso muere a mitad de camino —por
+    # cuota agotada, por un corte de red, por lo que sea— lo hecho queda en disco.
+    os.makedirs("datos", exist_ok=True)
+    sello = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    ruta = f"datos/simulacro-{sello}.json"
+
+    def guardar():
+        with open(ruta, "w", encoding="utf-8") as f:
+            json.dump({"fecha_utc": sello, "modelo": modelo_en_uso,
+                       "aciertos": sum(r["coincide"] for r in resultados),
+                       "total": len(resultados), "completo": len(resultados) == len(correos),
+                       "casos": resultados}, f, ensure_ascii=False, indent=2)
+
+    dirs_ruido, doms_ruido = remitentes_ruido()
+    if dirs_ruido or doms_ruido:
+        print(f"Ruido conocido: {len(dirs_ruido)} remitente(s), "
+              f"{len(doms_ruido)} dominio(s)\n")
+    automaticos = []
+
+    frases = codigos_convenidos()
+    if frases:
+        print(f"Códigos convenidos activos: {len(frases)}\n")
+
+    for idx, c in enumerate(correos, 1):
+        # Un código convenido gana sobre todo: JP pidió ese correo, y ninguna
+        # heurística de ruido debería poder taparlo.
+        codigo = tiene_codigo(c, frases)
+
+        # Atajo sin LLM: si JP ya marcó este remitente como ruido dos veces o
+        # más, y nunca de otra forma, no hace falta preguntárselo de nuevo.
+        motivo_auto = (None if (protegido(c) or codigo)
+                       else es_ruido_conocido(c, dirs_ruido, doms_ruido))
+        if motivo_auto and random.randrange(MUESTREO_CONTROL):   # 1 de cada N igual se pregunta
+            automaticos.append((c, f"ruido conocido — {motivo_auto}"))
+            resultados.append({**{k: c[k] for k in
+                                  ("uid", "de", "para", "cc", "asunto", "fecha", "message_id")},
+                               "cuerpo": c["cuerpo"][:4000],
+                               "prediccion": {"categoria": "RUIDO",
+                                              "motivo": motivo_auto, "confianza": "alta"},
+                               "correcto": "RUIDO", "coincide": True,
+                               "automatico": motivo_auto,
+                               "explicacion_jp": None, "marcados_importantes": [],
+                               "seg_clasificacion": 0.0, "seg_decision_jp": 0.0})
+            guardar()
+            print(f"  {idx}/{len(correos)}  AUTO ruido ({motivo_auto})", flush=True)
+            continue
+
+        t0 = time.time()
+        if codigo:
+            # Sin consultar al modelo: la frase está o no está.
+            pred = {"categoria": "TUYO", "confianza": "alta", "unanime": True,
+                    "motivo": f"código convenido: «{codigo}»", "pasadas": 0}
+            print(f"      [código] «{codigo}» — es tuyo sin discusión", flush=True)
+        else:
+            try:
+                pred = clasificar(sistema, c, MOTOR)
+            except Exception as e:
+                # Que se caigan TODOS los motores no puede costar la tanda. Lo
+                # valioso de cada correo es el criterio de JP, no mi opinión: se
+                # lo muestro igual y su respuesta queda registrada como siempre.
+                print(f"      (sin clasificar: {e})", flush=True)
+                pred = {"categoria": "ERROR", "confianza": "baja",
+                        "motivo": f"ningún motor respondió ({type(e).__name__})"}
+        t_clas = time.time() - t0
+
+        # Segundo atajo: el clasificador lleva 32 aciertos de 32 detectando
+        # ruido, sin un solo error. Cuando las dos pasadas coinciden en RUIDO,
+        # preguntárselo a JP no agrega información — y su tiempo es el recurso
+        # escaso. Exige unanimidad, respeta a los protegidos, y 1 de cada N se
+        # pregunta igual para no dejar de medir si el criterio se degrada.
+        if (pred["categoria"] == "RUIDO" and pred.get("unanime")
+                and not protegido(c) and random.randrange(MUESTREO_CONTROL)):
+            automaticos.append((c, "clasificador unánime"))
+            resultados.append({**{k: c[k] for k in
+                                  ("uid", "de", "para", "cc", "asunto", "fecha", "message_id")},
+                               "cuerpo": c["cuerpo"][:4000],
+                               "prediccion": pred, "correcto": "RUIDO",
+                               "coincide": True, "automatico": "clasificador unánime",
+                               "explicacion_jp": None, "marcados_importantes": [],
+                               "seg_clasificacion": round(t_clas, 2),
+                               "seg_decision_jp": 0.0})
+            guardar()
+            print(f"  {idx}/{len(correos)}  AUTO ruido (unánime)", flush=True)
+            continue
+
+        cuerpo = recortar(c["cuerpo"].replace("\r", ""), 600)
+        texto = (f"<b>{idx}/{len(correos)}</b>   <i>{html.escape(fecha_legible(c['fecha']))}</i>\n"
+                 f"<b>De:</b> {html.escape(recortar(c['de'], 90))}\n"
+                 f"<b>Para:</b> {html.escape(recortar(c['para'], 90))}\n"
+                 f"<b>CC:</b> {html.escape(recortar(c['cc'] or '(nadie)', 90))}\n"
+                 f"<b>Asunto:</b> {html.escape(recortar(c['asunto'], 120))}\n"
+                 f"{html.escape(adjuntos_legibles(c.get('adjuntos')))}\n\n"
+                 f"<pre>{html.escape(cuerpo)}</pre>\n\n¿Qué correspondía?")
+        m = tg("sendMessage", chat_id=chat, text=texto, parse_mode="HTML",
+               reply_markup=teclado(idx, TANDA))
+        msg_id = m["result"]["message_id"]
+
+        t_espera = time.time()
+        eleccion, offset, marcados = esperar_respuesta(
+            idx, offset, msg_id, texto, direcciones_externas(c))
+        t_espera = time.time() - t_espera
+
+        coincide = eleccion == pred["categoria"]
+        if pred.get("emitidas"):
+            # hubo desacuerdo entre pasadas: vale la pena que JP lo sepa, es la
+            # diferencia entre "me equivoqué" y "este caso es genuinamente ambiguo"
+            desacuerdo = (f"\n<i>Me clasifiqué distinto en cada pasada: "
+                          f"{' / '.join(pred['emitidas'])}</i>")
+        else:
+            desacuerdo = ""
+        if pred["categoria"] == "ERROR":
+            # No me equivoqué: no llegué a opinar. Decir "aprendido" acá sería
+            # atribuirme un criterio que no tuve.
+            veredicto = "⚠️ <b>No pude clasificarlo</b> — queda tu respuesta"
+        else:
+            veredicto = (("✅ <b>Coincidimos</b>" if coincide else
+                          f"📚 <b>Aprendido</b> — yo dije <b>{pred['categoria']}</b>")
+                         + desacuerdo)
+        tg_suave("editMessageText", chat_id=chat, message_id=msg_id, parse_mode="HTML",
+           text=texto.replace("¿Qué correspondía?",
+                              f"Vos: <b>{eleccion}</b>\n{veredicto}\n"
+                              f"<i>Mi motivo: {html.escape(pred.get('motivo',''))} "
+                              f"(confianza {pred.get('confianza','?')})</i>"))
+
+        explicacion = None
+        # si ningún motor respondió no hay nada que explicar: no me equivoqué
+        # de criterio, directamente no opiné
+        if not coincide and pred["categoria"] != "ERROR":
+            explicacion, offset = pedir_explicacion(
+                idx, offset, eleccion, pred["categoria"])
+
+        resultados.append({**{k: c[k] for k in
+                              ("uid", "de", "para", "cc", "asunto", "fecha", "message_id")},
+                           "cuerpo": c["cuerpo"][:4000],
+                           "prediccion": pred, "correcto": eleccion,
+                           "coincide": coincide,
+                           "explicacion_jp": explicacion,
+                           "marcados_importantes": marcados,
+                           "seg_clasificacion": round(t_clas, 2),
+                           "seg_decision_jp": round(t_espera, 1)})
+        guardar()
+        print(f"  {idx}/{len(correos)}  pred={pred['categoria']:<9} jp={eleccion:<9} "
+              f"{'ok' if coincide else 'DIFIERE'}  ({t_clas:.1f}s clas, {t_espera:.0f}s vos)")
+
+    # ---------------------------------------------------------- resumen
+    revisados = [r for r in resultados if not r.get("automatico")]
+    aciertos = sum(r["coincide"] for r in revisados)
+    n = len(revisados)
+    if not revisados:                       # tanda entera archivada sola
+        print("\n  Nada que revisar: todo se archivó como ruido conocido.")
+        return
+    t_clas_prom = sum(r["seg_clasificacion"] for r in revisados) / n
+    t_jp_prom = sum(r["seg_decision_jp"] for r in revisados) / n
+    fallos = [r for r in revisados if not r["coincide"]]
+
+    detalle = "\n\n".join(
+        f"• <b>{r['correcto']}</b> (yo dije {r['prediccion']['categoria']}) — "
+        f"{html.escape(recortar(r['asunto'], 45))}"
+        + (f"\n  <i>{html.escape(recortar(r['explicacion_jp'], 160))}</i>"
+           if r.get("explicacion_jp") else "")
+        for r in fallos) or "—"
+
+    tg("sendMessage", chat_id=chat, parse_mode="HTML", text=(
+        f"🧪 <b>Simulacro terminado</b>\n\n"
+        f"Coincidimos en <b>{aciertos} de {n}</b> de los que revisaste\n\n"
+        f"⏱ Yo tardé <b>{t_clas_prom:.1f}s</b> por correo\n"
+        f"⏱ Vos tardaste <b>{t_jp_prom:.0f}s</b> por correo\n"
+        f"⏱ Total: <b>{(time.time()-t_inicio)/60:.1f} min</b>\n\n"
+        f"<b>Donde nos diferimos:</b>\n{detalle}\n\n"
+        f"<i>Cada diferencia es una regla nueva. Nada se movió ni se envió.</i>"
+        + (f"\n\n🤖 <b>{len(automaticos)} archivados sin preguntarte</b> "
+           f"(ruido ya confirmado por vos):\n"
+           + "\n".join(f"• {html.escape(recortar(x[0]['asunto'], 40))} "
+                       f"<i>{x[1]}</i>" for x in automaticos[:8])
+           + ("\n…" if len(automaticos) > 8 else "")
+           + "\n\n<i>Si alguno no era ruido, decímelo y lo saco de la lista.</i>"
+           if automaticos else "")))
+
+    print(f"\n  Coincidencias: {aciertos}/{n}")
+    print(f"  Clasificación: {t_clas_prom:.1f}s por correo")
+    print(f"  Tu decisión:   {t_jp_prom:.0f}s por correo")
+    print(f"  Guardado en:   {ruta}")
+
+
+if __name__ == "__main__":
+    main()

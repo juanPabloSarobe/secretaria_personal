@@ -1,0 +1,27 @@
+{
+  "preferencia": [
+    "nvidia",
+    "groq"
+  ],
+  "catalogo": {
+    "nvidia": {
+      "url": "NVIDIA_BASE_URL",
+      "clave": "NVIDIA_API_KEY",
+      "modelo": "nvidia/nemotron-3-super-120b-a12b"
+    },
+    "groq": {
+      "url": "GROQ_BASE_URL",
+      "clave": "GROQ_API_KEY",
+      "modelo": "qwen/qwen3.6-27b",
+      "nota": "2026-08-19: llama-3.3-70b-versatile fue dado de baja por groq y devolvía 404 sin que se notara, porque nvidia contestaba y el fallo parecía cuota agotada. El modelo nuevo tampoco sirve hoy: el nivel gratuito rechaza el prompt entero con HTTP 413 (unos 6.000 tokens de roster + reglas). O sea que HOY NO HAY RESPALDO REAL. Se arregla achicando el prompt, habilitando ollama, o pagando el nivel de groq."
+    }
+  },
+  "fuera": {
+    "ollama": {
+      "url": "OLLAMA_BASE_URL",
+      "clave": "OLLAMA_API_KEY",
+      "modelo": "qwen2.5vl:7b",
+      "motivo": "2026-08-28: probado y descartado como respaldo. Es el unico modelo instalado en esta Mac (qwen2.5vl:7b, de vision, 7B) porque JP pidio no bajar ninguno. Traga el prompt de 6.500 tokens y contesta en 6s -tres veces mas rapido que nvidia-, pero medido contra los casos que JP dictamino rompio 11 de los primeros 14, y casi todos hacia RUIDO: TUYO y NATALIA que el clasificador bueno acertaba, este los manda al tacho. Como RUIDO unanime se archiva solo, un respaldo asi es peor que no tener respaldo. Se vuelve a evaluar con un modelo de texto de 14B o mas."
+    }
+  }
+}
