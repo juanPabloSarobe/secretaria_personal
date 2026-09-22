@@ -288,6 +288,24 @@ excepciones, y las dos son mecánicas:
   era la remitente. JP: "yo solo estoy en copia. Este es un ejemplo de cuando
   estoy en copia de un pedido pero no es para mí")
 
+- **Pero si el del equipo contesta para derivarle el asunto a JP, es TUYO.**
+  La señal no es que JP esté en copia: es que la respuesta del equipo dice, en
+  cualquier forma, "esto lo contesta Juan Pablo" —lo pone en copia *para que
+  responda*, avisa que él va a contestar, o deriva la pregunta—. Ahí el hilo
+  dejó de estar resuelto por el equipo y volvió a JP.
+
+  Es la excepción de la regla de arriba, y hay que leerlas juntas: las dos
+  hablan de un correo del equipo con JP en copia. Lo que las separa es si el
+  equipo **cerró** el tema (DELEGADO) o si lo **devolvió** (TUYO).
+
+  (aprendida 2026-08-26 — administracion@fullcontrolgps.com.ar, "RE: Consulta
+  sobre necesidad en el histórico del vehículo". El clasificador dijo DELEGADO
+  con el motivo "Natalia ya respondió". JP: "si bien el equipo ya está
+  trabajando y hubo una conversación previa, Sebastián hizo una pregunta que
+  Natalia no pudo responder por algún motivo y ella le está avisando a
+  Sebastián que me ponen copia a mí para que yo responda. Entonces eso es un
+  mail que Natalia me está derivando hacia mí")
+
 ### Qué es de Enzo y qué no
 
 La frontera no es "suena técnico". Enzo hace lo que se resuelve **desde el
@@ -340,3 +358,37 @@ seguimiento y asegurarnos que la tarea se cumpla».
   IMSEG. JP: "hay que enviar una programación remota para obtener los imei s, y
   Enzo se encarga de las programaciones remotas. Igualmente está bien que yo
   esté informado, por ende también me tiene que llegar este correo")
+
+### Sueldos: las novedades son de JP, los trámites son de Natalia
+
+**Las novedades de la liquidación de sueldos las contesta JP**, no Natalia,
+aunque el resto de la administración sea de ella. Novedades son las que
+cambian lo que se liquida: vacaciones tomadas, aumentos, altas y bajas.
+
+Lo de Natalia es lo que rodea a la liquidación una vez decidida: impuestos,
+envío de recibos, y lo que la contadora le pida a ella directamente.
+
+  (aprendida 2026-08-26 — Vanesa Natalia Escudero, "Sueldos agosto 2026". El
+  clasificador dijo NATALIA. JP: "las liquidaciones de sueldo es mi
+  responsabilidad, yo le digo para el sueldo Natalia, entonces yo tengo que
+  pasar si se tomó vacaciones y quiero aumentar... más allá de que la contadora
+  puede pedirle algo a ella como un impuesto o algo por el estilo, o enviar los
+  recibos, pero las novedades de la liquidación del sueldo suelo responderlas
+  yo")
+
+### Pólizas de seguro: van a Natalia aunque el asegurado sea JP
+
+**Una póliza a nombre de JP pero contratada para el trabajo es NATALIA**, no
+TUYO. No es una excepción a "los asuntos personales de JP son suyos": es que
+esta póliza no es un asunto personal, es una herramienta de trabajo que está a
+su nombre. JP prefiere que las pólizas queden archivadas en el correo de
+Natalia, que es quien las administra.
+
+Ojo con la señal fácil: que el asunto traiga el nombre completo de JP no lo
+hace suyo.
+
+  (aprendida 2026-08-26 — Meridional Seguros, "SAROBE, JUAN PABLO: te enviamos
+  tu póliza digital N° 187-000014446212-000002". El clasificador dijo TUYO. JP:
+  "se lo derivamos a Natalia porque si bien es un seguro personal mío, pero es
+  para el trabajo. Entonces prefiero que ella los tenga en su correo y que
+  vayan quedando ahí. Que se encargue ella")
